@@ -74,7 +74,9 @@ describe("packed Sandlot release artifact", () => {
     expect(docs["security.md"]).toMatch(/^##\s+Limitations$/m);
     expect(docs["diagnostics.md"]).toMatch(/^##\s+Diagnostics$/m);
     expect(docs["development.md"]).toMatch(/^##\s+Development$/m);
-    expect(docs["releases.md"]).toMatch(/^##\s+Release process$/m);
+    expect(docs["releases.md"]).toMatch(/^#\s+Releases$/m);
+    expect(docs["releases.md"]).toMatch(/^##\s+Release contract$/m);
+    expect(docs["releases.md"]).toMatch(/^##\s+Publish a stable version$/m);
   });
 
   it("places the clean release build before every artifact smoke and never rebuilds afterward", () => {
