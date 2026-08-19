@@ -1,11 +1,11 @@
-import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager, type SandboxAskCallback, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 interface ServiceManager {
     updateConfig(config: SandboxRuntimeConfig): void;
     checkDependenciesAsync(ripgrepConfig?: {
         command: string;
         args?: string[];
     }): Promise<unknown>;
-    initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+    initialize(config: SandboxRuntimeConfig, askCallback?: SandboxAskCallback, enableLogMonitor?: boolean): Promise<void>;
     wrapWithSandboxArgv(command: string, binShell?: string, customConfig?: Partial<SandboxRuntimeConfig>, signal?: AbortSignal, cwd?: string, options?: {
         commandId?: string;
         commandText?: string;

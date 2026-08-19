@@ -1,4 +1,5 @@
 import type { SandboxDependencyCheck, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { NetworkMode } from "./config.js";
 import type { SandboxExecutionTerminationGate, SandboxViolationLike, SandboxViolationStoreLike } from "./runner.js";
 import { type SandlotSessionTemporaryDirectoryCreationResult } from "./session-temporary-directory.js";
 export interface SandboxRuntimeTransport {
@@ -42,12 +43,12 @@ export declare class SandboxRuntimeBoundary {
     constructor(options: SandboxRuntimeBoundaryOptions);
     open(cwd: string): Promise<void>;
     private openOnce;
-    updateConfig(config: SandboxRuntimeConfig): Promise<void>;
+    updateConfig(config: SandboxRuntimeConfig, networkMode?: NetworkMode): Promise<void>;
     checkDependenciesAsync(ripgrepConfig?: {
         command: string;
         args?: string[];
     }): Promise<SandboxDependencyCheck>;
-    initialize(config: SandboxRuntimeConfig, _askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+    initialize(config: SandboxRuntimeConfig, _askCallback?: undefined, enableLogMonitor?: boolean, networkMode?: NetworkMode): Promise<void>;
     wrapWithSandboxArgv(command: string, binShell?: string, _customConfig?: undefined, abortSignal?: AbortSignal, cwd?: string, options?: BoundaryWrapOptions): Promise<WrapDescriptor>;
     collectViolations(commandId: string): Promise<readonly SandboxViolationLike[]>;
     cleanupAfterCommand(): Promise<void>;

@@ -12,7 +12,7 @@ export function renderDiagnosticSnapshot(input) {
         `protected ownership: ${ownershipStatus(input.tools, input.sandlotSourcePath)}`,
     ];
     if (policy !== undefined) {
-        lines.push(`policy: enabled=${String(policy.enabled)}, allowed domains=${policy.network.allowedDomains.length}, denied reads=${policy.filesystem.denyRead.length}, allowed writes=${policy.filesystem.allowWrite.length}, trusted custom tools=${policy.trustedCustomTools.length}`);
+        lines.push(`policy: enabled=${String(policy.enabled)}, network mode=${policy.networkMode}, allowed domains=${policy.network.allowedDomains.length}, denied reads=${policy.filesystem.denyRead.length}, allowed writes=${policy.filesystem.allowWrite.length}, trusted custom tools=${policy.trustedCustomTools.length}`);
     }
     if (input.runtime.error !== undefined)
         lines.push(`error: ${redactDiagnosticText(input.runtime.error)}`);

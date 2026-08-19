@@ -11,10 +11,27 @@ Sandlot reads strict JSON objects from these exact locations:
 
 ## User policy
 
+### Unrestricted outbound network (trusted user only)
+
+Use this exact user-policy object only when the trusted user intentionally needs to remove outbound host/domain filtering:
+
+<!-- sandlot-policy: user -->
+```json
+{
+  "network": {
+    "mode": "unrestricted"
+  }
+}
+```
+
+`network.mode: "unrestricted"` removes only outbound host/domain filtering. It does not relax filesystem, process, environment, credential, Unix-socket, local-binding, or lifecycle protections. The filtered mode remains the default and retains its strict allowlist behavior, including denying outbound destinations when the allowlist is empty.
+
+This is trusted-user-only: project policy cannot select it. In this mode the `network` object must have no sibling fields, and any project `network` block is rejected. Because any sandbox-readable data can be sent to any destination, use this mode only for commands and inputs you trust. Injected credentials are unavailable; mask-mode credentials receive sentinel values and have no real injection target.
+
 The strict user-policy object accepts these controls:
 
 - `enabled` enables or disables Sandlot for the trusted user.
-- `network` accepts `allowedDomains`, `deniedDomains`, `deniedDomainReasons`, `allowUnixSockets`, `allowAllUnixSockets`, `allowLocalBinding`, `allowMachLookup`, and `tlsTerminate`. `tlsTerminate` accepts `caCertPath`, `caKeyPath`, `excludeDomains`, and `extraCaCertPaths`. Network access always uses a strict allowlist.
+- `network` either accepts only `mode: "unrestricted"` as described above, or (in the default filtered mode) accepts `allowedDomains`, `deniedDomains`, `deniedDomainReasons`, `allowUnixSockets`, `allowAllUnixSockets`, `allowLocalBinding`, `allowMachLookup`, and `tlsTerminate`. `tlsTerminate` accepts `caCertPath`, `caKeyPath`, `excludeDomains`, and `extraCaCertPaths`.
 - `filesystem` accepts `disabled`, `denyRead`, `allowRead`, `allowWrite`, `denyWrite`, and `allowGitConfig`.
 - `credentials` accepts `files`, `envVars`, `allowPlaintextInject`, `awsPairs`, and `sigv4`. File credentials use `path`, `mode`, and optional `extract`, `onExtractNoMatch`, `decode`, `maskClaims`, `maskDuplicates`, and `injectHosts`; environment credentials use the corresponding `name` form. AWS pairs name access-key, secret-key, and optional session-token variables. `sigv4` controls `streaming`, `presigned`, and `sigv4a`.
 - `environment` accepts `passThrough`, `deny`, and `exposePiSessionMetadata`.
@@ -45,13 +62,13 @@ A secure user policy can permit one API and CI metadata while preserving the def
 }
 ```
 
-Credential entries default to denial. Masked, host-scoped injection requires `network.tlsTerminate`; the destination in `injectHosts` must also be covered by the effective domain allowlist. Sandbox Runtime rejects masking without TLS termination unless `credentials.allowPlaintextInject` is explicitly enabled. That plaintext escape hatch is less safe and is not recommended. Pi's provider credentials are used by trusted host-side model requests and normally do not belong in the sandbox environment.
+Credential entries default to denial. In filtered mode, masked, host-scoped injection requires `network.tlsTerminate`; the destination in `injectHosts` must also be covered by the effective domain allowlist. Sandbox Runtime rejects masking without TLS termination unless `credentials.allowPlaintextInject` is explicitly enabled. That plaintext escape hatch is less safe and is not recommended. In unrestricted mode, injection is unavailable: `injectHosts` is rejected and mask-mode credentials use sentinel values with no real injection target. Pi's provider credentials are used by trusted host-side model requests and normally do not belong in the sandbox environment.
 
 `environment.passThrough` is an explicit grant, while `environment.deny` removes the named host or pass-through value. A name governed by credential policy is never passed through raw; its mask or denial takes precedence. Listing a name in `trustedCustomTools` trusts that tool's entire implementation: custom tools and extension code can access the host directly, outside Sandlot's protected data plane. Review trusted extensions before installation.
 
 ## Project policy
 
-The project schema deliberately exposes only narrowing controls. Its `network` object accepts `allowedDomains`, `deniedDomains`, `allowUnixSockets`, `allowMachLookup`, and false-only `allowAllUnixSockets` and `allowLocalBinding`. Its `filesystem` object accepts `denyRead`, `allowRead`, `allowWrite`, `denyWrite`, and false-only `disabled` and `allowGitConfig`. The top-level project controls are `trustedCustomTools` plus false-only `enableWeakerNestedSandbox`, `enableWeakerNetworkIsolation`, and `allowAppleEvents`. A project allowlist must be covered by the user allowlist; project read/write paths must stay within user-granted paths; deny lists are unioned; and a project may remove trusted tools or dangerous capabilities but cannot add them.
+The project schema deliberately exposes only narrowing controls. Its `network` object accepts `allowedDomains`, `deniedDomains`, `allowUnixSockets`, `allowMachLookup`, and false-only `allowAllUnixSockets` and `allowLocalBinding`—except when the trusted user selects `network.mode: "unrestricted"`, in which case every project `network` block is rejected. Its `filesystem` object accepts `denyRead`, `allowRead`, `allowWrite`, `denyWrite`, and false-only `disabled` and `allowGitConfig`. The top-level project controls are `trustedCustomTools` plus false-only `enableWeakerNestedSandbox`, `enableWeakerNetworkIsolation`, and `allowAppleEvents`. A project allowlist must be covered by the user allowlist; project read/write paths must stay within user-granted paths; deny lists are unioned; and a project may remove trusted tools or dangerous capabilities but cannot add them.
 
 A trusted project can tighten that ceiling:
 

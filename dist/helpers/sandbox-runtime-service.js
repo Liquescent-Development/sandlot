@@ -11,13 +11,24 @@ function serviceState(manager) {
     let state = serviceStates.get(manager);
     if (state === undefined) {
         state = {
+            lifecycleGeneration: 0,
+            managerLifecycleTail: Promise.resolve(),
+            managerLifecycleBarrierError: undefined,
             credentialEnvironment: Object.create(null),
             config: undefined,
+            stagedNetworkMode: undefined,
+            initializingNetworkMode: undefined,
+            initializedNetworkMode: undefined,
             activeOperations: 0,
         };
         serviceStates.set(manager, state);
     }
     return state;
+}
+function queueManagerLifecycle(state, operation) {
+    const queuedOperation = state.managerLifecycleTail.then(operation);
+    state.managerLifecycleTail = queuedOperation.then(() => undefined, () => undefined);
+    return queuedOperation;
 }
 const SERVICE_OPERATION_TIMEOUTS = Object.freeze({
     updateConfig: 4_500,
@@ -36,6 +47,7 @@ const MAX_IPC_DATA_DEPTH = 20;
 const MAX_IPC_DATA_NODES = 16_384;
 const MAX_CREDENTIAL_ENVIRONMENT_NAMES = 128;
 const MAX_CREDENTIAL_VALUE_BYTES = 256 * 1024;
+const allowAllNetwork = async () => true;
 // SRT 0.0.73 roots its built-in mandatory control-path denies at
 // process.cwd(), rather than at the cwd argument passed to wrapWithSandboxArgv.
 // Serialize only the short wrapping phase while temporarily selecting the
@@ -74,12 +86,18 @@ export async function handleSandboxRuntimeRequest(manager, operation, payload, s
 async function dispatchSandboxRuntimeRequest(manager, state, operation, payload, signal, dependencies) {
     switch (operation) {
         case "updateConfig": {
-            const record = requiredPayloadRecord(payload, ["config", "credentialEnvironment"], ["config"]);
+            const record = requiredPayloadRecord(payload, ["config", "networkMode", "credentialEnvironment"], ["config", "networkMode"]);
             const config = requiredConfig(record.config);
+            const networkMode = requiredNetworkMode(record.networkMode);
+            assertNetworkModeConfigPair(networkMode, config);
+            if (state.initializingNetworkMode !== undefined || state.initializedNetworkMode !== undefined) {
+                throw new Error("Sandbox Runtime service config cannot change after initialization begins");
+            }
             const credentialEnvironment = requiredCredentialEnvironment(record.credentialEnvironment, config);
             manager.updateConfig(config);
             state.credentialEnvironment = credentialEnvironment;
             state.config = config;
+            state.stagedNetworkMode = networkMode;
             return undefined;
         }
         case "checkDependencies": {
@@ -87,19 +105,49 @@ async function dispatchSandboxRuntimeRequest(manager, state, operation, payload,
             return manager.checkDependenciesAsync(optionalRipgrepConfig(record.ripgrepConfig));
         }
         case "initialize": {
-            const record = requiredPayloadRecord(payload, ["config", "enableLogMonitor", "credentialEnvironment"], ["config"]);
+            const record = requiredPayloadRecord(payload, ["config", "networkMode", "enableLogMonitor", "credentialEnvironment"], ["config", "networkMode"]);
             const config = requiredConfig(record.config);
+            const networkMode = requiredNetworkMode(record.networkMode);
+            assertNetworkModeConfigPair(networkMode, config);
+            if (state.initializingNetworkMode !== undefined || state.initializedNetworkMode !== undefined) {
+                throw new Error("Sandbox Runtime service is already initialized");
+            }
+            if (state.stagedNetworkMode !== undefined && state.stagedNetworkMode !== networkMode) {
+                throw new Error("Sandbox Runtime service initialization network mode does not match staged config");
+            }
             const credentialEnvironment = requiredCredentialEnvironment(record.credentialEnvironment, config);
             if (record.enableLogMonitor !== undefined && typeof record.enableLogMonitor !== "boolean") {
                 throw new Error("Sandbox Runtime service enableLogMonitor must be boolean");
             }
-            await manager.initialize(config, undefined, record.enableLogMonitor === true);
-            state.credentialEnvironment = credentialEnvironment;
-            state.config = config;
+            const initializationGeneration = state.lifecycleGeneration;
+            state.initializingNetworkMode = networkMode;
+            try {
+                await queueManagerLifecycle(state, async () => {
+                    if (state.managerLifecycleBarrierError !== undefined) {
+                        throw state.managerLifecycleBarrierError;
+                    }
+                    await manager.initialize(config, networkMode === "unrestricted" ? allowAllNetwork : undefined, record.enableLogMonitor === true);
+                });
+                if (state.lifecycleGeneration !== initializationGeneration) {
+                    throw new Error("Sandbox Runtime service initialization was cancelled by reset");
+                }
+                state.credentialEnvironment = credentialEnvironment;
+                state.config = config;
+                state.stagedNetworkMode = networkMode;
+                state.initializedNetworkMode = networkMode;
+            }
+            finally {
+                if (state.lifecycleGeneration === initializationGeneration) {
+                    state.initializingNetworkMode = undefined;
+                }
+            }
             return undefined;
         }
         case "wrap": {
             const record = requiredPayloadRecord(payload, ["command", "binShell", "cwd", "options", "mandatoryScan"], ["command", "cwd"]);
+            if (state.initializedNetworkMode === undefined) {
+                throw new Error("Sandbox Runtime service cannot wrap before it has initialized");
+            }
             const wrapCwd = requiredAbsolutePath(record.cwd, "wrap cwd");
             if (record.mandatoryScan !== undefined) {
                 const mandatoryScan = requiredPayloadRecord(record.mandatoryScan, ["ripgrepCommand"], ["ripgrepCommand"]);
@@ -130,15 +178,33 @@ async function dispatchSandboxRuntimeRequest(manager, state, operation, payload,
         case "reset":
             requireNoPayload(payload, operation);
             const resetCredentialEnvironment = state.credentialEnvironment;
+            const resetOvertakesInitialization = state.initializingNetworkMode !== undefined;
+            state.lifecycleGeneration++;
+            state.credentialEnvironment = Object.create(null);
+            state.config = undefined;
+            state.stagedNetworkMode = undefined;
+            state.initializingNetworkMode = undefined;
+            state.initializedNetworkMode = undefined;
             try {
-                await manager.reset();
+                const resetManager = queueManagerLifecycle(state, async () => {
+                    try {
+                        await manager.reset();
+                        state.managerLifecycleBarrierError = undefined;
+                    }
+                    catch (error) {
+                        const barrierError = redactCredentialError(error, resetCredentialEnvironment);
+                        state.managerLifecycleBarrierError = barrierError;
+                        throw barrierError;
+                    }
+                });
+                if (resetOvertakesInitialization) {
+                    void resetManager.catch(() => undefined);
+                    return undefined;
+                }
+                await resetManager;
             }
             catch (error) {
                 throw redactCredentialError(error, resetCredentialEnvironment);
-            }
-            finally {
-                state.credentialEnvironment = Object.create(null);
-                state.config = undefined;
             }
             return undefined;
     }
@@ -289,8 +355,13 @@ function startService(manager) {
         for (const controller of active.values())
             controller.abort();
         active.clear();
-        serviceState(manager).credentialEnvironment = Object.create(null);
-        serviceState(manager).config = undefined;
+        const state = serviceState(manager);
+        state.lifecycleGeneration++;
+        state.credentialEnvironment = Object.create(null);
+        state.config = undefined;
+        state.stagedNetworkMode = undefined;
+        state.initializingNetworkMode = undefined;
+        state.initializedNetworkMode = undefined;
         void withOperationDeadline(Promise.resolve().then(() => manager.reset()), "reset", 1_000)
             .catch(() => undefined)
             .finally(() => process.exit(exitCode));
@@ -467,6 +538,25 @@ function requiredConfig(value) {
     }
     return SandboxRuntimeConfigSchema.parse(value);
 }
+function requiredNetworkMode(value) {
+    if (value === "filtered" || value === "unrestricted")
+        return value;
+    throw new Error("Sandbox Runtime service network mode must be filtered or unrestricted");
+}
+function assertNetworkModeConfigPair(networkMode, config) {
+    const network = config.network;
+    if (networkMode === "filtered") {
+        if (network.strictAllowlist !== true) {
+            throw new Error("Sandbox Runtime service filtered network mode requires strict allowlisting");
+        }
+        return;
+    }
+    if (network.strictAllowlist !== false
+        || network.allowedDomains.length !== 0
+        || network.deniedDomains.length !== 0) {
+        throw new Error("Sandbox Runtime service unrestricted network mode requires strictAllowlist false and empty domain lists");
+    }
+}
 function requiredCredentialEnvironment(value, config) {
     const record = optionalRecord(value);
     const allowed = new Set((config.credentials?.envVars ?? [])
@@ -499,8 +589,8 @@ function credentialEnvironmentForRequest(operation, payload) {
     if (operation !== "updateConfig" && operation !== "initialize")
         return undefined;
     const record = requiredPayloadRecord(payload, operation === "updateConfig"
-        ? ["config", "credentialEnvironment"]
-        : ["config", "enableLogMonitor", "credentialEnvironment"], ["config"]);
+        ? ["config", "networkMode", "credentialEnvironment"]
+        : ["config", "networkMode", "enableLogMonitor", "credentialEnvironment"], ["config", "networkMode"]);
     return requiredCredentialEnvironment(record.credentialEnvironment, requiredConfig(record.config));
 }
 function optionalWrapOptions(value) {

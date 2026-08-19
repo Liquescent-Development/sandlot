@@ -38,7 +38,22 @@ Launch Pi in a trusted project, then run `/sandlot`. A `🔒 Sandlot` footer and
 
 Sandlot denies network access, Unix sockets, local binding, Apple Events, weaker isolation, common credentials, and Pi state by default. Project writes inside the workspace are allowed except for protected configuration and security paths, including project `.pi` settings and Git security/configuration files. Writes outside the project are denied. Project policy can narrow a trusted user's ceiling but cannot widen it. See the [security guide](docs/security.md) before allowing a network destination, credential, or custom tool.
 
-### Small configuration example
+### Unrestricted outbound network (trusted user only)
+
+Only a trusted user's `~/.pi/agent/sandlot.json` may opt out of Sandlot's outbound host/domain filtering:
+
+<!-- sandlot-policy: user -->
+```json
+{
+  "network": {
+    "mode": "unrestricted"
+  }
+}
+```
+
+This removes only outbound host/domain filtering. The default remains `filtered`, including the empty allowlist that denies outbound HTTP. In unrestricted mode, any data readable by the sandbox can be sent to any destination, so use it only when you trust the commands and their inputs. Filesystem, process, environment, credential, Unix-socket, local-binding, and lifecycle protections remain enforced. Credential injection is unavailable in this mode; masked credentials receive sentinel values, with no real injection target. The `network` object must contain only `mode`—sibling network fields are rejected—and project policy may not contain a `network` block when this trusted-user mode is selected.
+
+### Explicit disable
 
 Only a trusted user can disable the boundary. This is useful for diagnosis, but it intentionally runs protected operations on the host:
 

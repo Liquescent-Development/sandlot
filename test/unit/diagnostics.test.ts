@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { redactDiagnosticText, renderDiagnosticSnapshot } from "../../src/diagnostics.js";
+import type { EffectivePolicy } from "../../src/policy.js";
 
 describe("diagnostic redaction", () => {
   it("redacts file URLs and quoted POSIX paths without retaining host path components", () => {
@@ -54,3 +55,52 @@ describe("diagnostic violation selection", () => {
     expect(rendered.indexOf("https://new.invalid/1")).toBeLessThan(rendered.indexOf("https://duplicate.invalid/value"));
   });
 });
+
+describe("diagnostic policy summary", () => {
+  it.each(["filtered", "unrestricted"] as const)("reports the effective %s network mode without policy values", (networkMode) => {
+    const rendered = renderDiagnosticSnapshot({
+      platform: "darwin",
+      runtime: {
+        state: "ready",
+        generation: 1,
+        policy: policyWithNetworkMode(networkMode),
+        error: undefined,
+        activeInvocationIds: [],
+      },
+      dependencyWarnings: [],
+      tools: [],
+      sandlotSourcePath: "/trusted/sandlot.js",
+      violations: [],
+    });
+
+    expect(rendered).toContain(`network mode=${networkMode}`);
+    expect(rendered).not.toContain("api.example.test");
+  });
+});
+
+function policyWithNetworkMode(networkMode: "filtered" | "unrestricted"): EffectivePolicy {
+  return {
+    enabled: true,
+    networkMode,
+    network: {
+      allowedDomains: ["api.example.test"],
+      deniedDomains: [],
+      strictAllowlist: networkMode === "filtered",
+      allowUnixSockets: [],
+      allowAllUnixSockets: false,
+      allowLocalBinding: false,
+      allowMachLookup: [],
+    },
+    filesystem: { disabled: false, denyRead: [], allowWrite: [], denyWrite: [], allowGitConfig: false },
+    credentials: undefined,
+    environment: { passThrough: [], deny: [], exposePiSessionMetadata: false },
+    trustedCustomTools: [],
+    enableWeakerNestedSandbox: false,
+    enableWeakerNetworkIsolation: false,
+    allowAppleEvents: false,
+    ripgrep: undefined,
+    seccomp: undefined,
+    bwrapPath: undefined,
+    socatPath: undefined,
+  };
+}
