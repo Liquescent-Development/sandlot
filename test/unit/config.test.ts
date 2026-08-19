@@ -77,13 +77,16 @@ describe("Sandlot configuration", () => {
   });
 
   it("accepts unrestricted masking when no credential injection is requested", () => {
-    expect(parseUserPolicy({
-      network: { mode: "unrestricted" },
-      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
-    })).toMatchObject({
+    const policy = parseUserPolicy({
       network: { mode: "unrestricted" },
       credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
     });
+
+    expect(policy).toMatchObject({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    });
+    expect(policy.network).not.toHaveProperty("tlsTerminate");
   });
 
   it("rejects filtered network rules in unrestricted mode", () => {

@@ -242,6 +242,9 @@ async function requiredGitRealpath(path: string, label: string): Promise<string>
 }
 
 export function toSandboxRuntimeConfig(effective: EffectivePolicy): SandboxRuntimeConfig {
+  const tlsTerminate = effective.networkMode === "unrestricted" && hasMaskedCredentials(effective.credentials)
+    ? {}
+    : effective.network.tlsTerminate;
   return SandboxRuntimeConfigSchema.parse({
     network: {
       allowedDomains: effective.network.allowedDomains,
@@ -252,7 +255,7 @@ export function toSandboxRuntimeConfig(effective: EffectivePolicy): SandboxRunti
       allowAllUnixSockets: effective.network.allowAllUnixSockets,
       allowLocalBinding: effective.network.allowLocalBinding,
       allowMachLookup: effective.network.allowMachLookup,
-      tlsTerminate: effective.network.tlsTerminate,
+      ...(tlsTerminate === undefined ? {} : { tlsTerminate }),
     },
     filesystem: effective.filesystem,
     credentials: effective.credentials,
@@ -523,11 +526,11 @@ function credentialsForRuntime(
       }
     }
   }
-  return {
-    ...credentials,
-    files: credentials.files?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
-    envVars: credentials.envVars?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
-  };
+  return credentials;
+}
+
+function hasMaskedCredentials(credentials: NonNullable<UserPolicy["credentials"]> | undefined): boolean {
+  return [...(credentials?.files ?? []), ...(credentials?.envVars ?? [])].some((entry) => entry.mode === "mask");
 }
 
 function parseDomainPattern(pattern: string): ParsedDomainPattern {

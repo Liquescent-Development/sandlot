@@ -322,15 +322,17 @@ function validateSandboxRuntimePolicy(policy: UserPolicy, source: string): void 
     const { mode: _mode, strictAllowlist: _strictAllowlist, ...filteredNetwork } = userNetwork;
     network = filteredNetwork;
   }
+  const credentials = credentialsForRuntime(policy.credentials, policy.network?.mode, source);
   const result = SandboxRuntimeConfigSchema.safeParse({
     network: {
       allowedDomains: [],
       deniedDomains: [],
       ...network,
       strictAllowlist: policy.network?.mode !== "unrestricted",
+      ...(policy.network?.mode === "unrestricted" && hasMaskedCredentials(credentials) ? { tlsTerminate: {} } : {}),
     },
     filesystem: { denyRead: [], allowWrite: [], denyWrite: [], ...policy.filesystem },
-    credentials: credentialsForRuntime(policy.credentials, policy.network?.mode, source),
+    credentials,
     enableWeakerNestedSandbox: policy.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: policy.enableWeakerNetworkIsolation,
     allowAppleEvents: policy.allowAppleEvents,
@@ -358,11 +360,11 @@ function credentialsForRuntime(
       }
     }
   }
-  return {
-    ...credentials,
-    files: credentials.files?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
-    envVars: credentials.envVars?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
-  };
+  return credentials;
+}
+
+function hasMaskedCredentials(credentials: UserPolicy["credentials"]): boolean {
+  return [...(credentials?.files ?? []), ...(credentials?.envVars ?? [])].some((entry) => entry.mode === "mask");
 }
 
 function validateProjectRuntimePolicy(policy: ProjectPolicy, source: string): void {

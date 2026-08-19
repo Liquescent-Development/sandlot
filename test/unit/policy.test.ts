@@ -373,7 +373,8 @@ describe("policy composition", () => {
     expect(effective.networkMode).toBe("unrestricted");
     expect(effective.network.allowedDomains).toEqual([]);
     expect(effective.network.deniedDomains).toEqual([]);
-    expect(toSandboxRuntimeConfig(effective).network).toMatchObject({
+    const runtime = toSandboxRuntimeConfig(effective);
+    expect(runtime.network).toMatchObject({
       allowedDomains: [],
       deniedDomains: [],
       strictAllowlist: false,
@@ -381,6 +382,7 @@ describe("policy composition", () => {
       allowAllUnixSockets: false,
       allowLocalBinding: false,
     });
+    expect(runtime.network).not.toHaveProperty("tlsTerminate");
   });
 
   it("rejects every project network block in unrestricted user mode", async () => {
@@ -404,7 +406,17 @@ describe("policy composition", () => {
       network: { mode: "unrestricted" },
       credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
     }, undefined, context);
-    expect(toSandboxRuntimeConfig(masked).credentials?.envVars).toEqual([{ name: "TOKEN", mode: "deny" }]);
+    expect(masked.credentials?.envVars).toEqual([{ name: "TOKEN", mode: "mask" }]);
+    expect(masked.network.tlsTerminate).toBeUndefined();
+    expect(toSandboxRuntimeConfig(masked)).toMatchObject({
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+        strictAllowlist: false,
+        tlsTerminate: {},
+      },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    });
     await expect(composePolicy({
       network: { mode: "unrestricted" },
       credentials: { envVars: [{ name: "TOKEN", mode: "deny", injectHosts: ["api.example.com"] }] },
