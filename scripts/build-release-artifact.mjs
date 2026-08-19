@@ -30,6 +30,8 @@ export function parsePackReport(raw, expected) {
   const report = reports[0];
   if (
     expected.name !== "sandlot"
+    || typeof expected.version !== "string"
+    || !STABLE_VERSION.test(expected.version)
     || report.name !== "sandlot"
     || report.name !== expected.name
     || report.version !== expected.version
@@ -282,15 +284,30 @@ async function writeAtomically(outDir, filename, contents) {
 }
 
 async function cleanupPartialOutputs(outDir) {
-  let entries;
-  try {
-    entries = await readdir(outDir, { withFileTypes: true });
-  } catch {
+  const info = await lstat(outDir).catch(() => undefined);
+  if (info === undefined || !info.isDirectory() || info.isSymbolicLink()) return;
+  const entries = await readdir(outDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) await cleanupOutputPath(resolve(outDir, entry.name), entry);
+}
+
+async function cleanupOutputPath(path, entry) {
+  if (entry.isSymbolicLink()) {
+    await unlink(path).catch(() => undefined);
     return;
   }
-  await Promise.all(entries.filter((entry) => !entry.isDirectory()).map(async (entry) => {
-    try { await unlink(resolve(outDir, entry.name)); } catch { /* best effort cleanup */ }
-  }));
+  const info = await lstat(path).catch(() => undefined);
+  if (info === undefined) return;
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    await unlink(path).catch(() => undefined);
+    return;
+  }
+  const entries = await readdir(path, { withFileTypes: true }).catch(() => []);
+  for (const child of entries) await cleanupOutputPath(resolve(path, child.name), child);
+  try {
+    await rmdir(path);
+  } catch {
+    // Best-effort cleanup preserves a private output directory even if a process races us.
+  }
 }
 
 async function mkdirTemporary(prefix) {
@@ -330,7 +347,7 @@ function validateOutDir(outDir) {
 }
 
 function isSafeTarballName(name) {
-  return typeof name === "string" && name.length > 0 && name.length <= 255 && name === basename(name) && !name.includes("/") && !name.includes("\\") && name !== "." && name !== ".." && name.endsWith(".tgz") && !name.includes("\\0");
+  return typeof name === "string" && name.length > 0 && name.length <= 255 && name === basename(name) && !name.includes("/") && !name.includes("\\") && name !== "." && name !== ".." && name.endsWith(".tgz") && !name.includes("\0");
 }
 
 function isSha512Integrity(value) {

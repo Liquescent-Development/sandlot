@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -40,15 +40,19 @@ describe("release artifact builder", () => {
     ["wrong package", JSON.stringify([validReport({ name: "other" })])],
     ["non-sandlot expected package", JSON.stringify([validReport({ name: "other" })]), { name: "other", version: "0.1.0" }],
     ["wrong version", JSON.stringify([validReport({ version: "0.1.1" })])],
+    ["missing requested version", JSON.stringify([validReport({ version: undefined })]), { name: "sandlot" }],
+    ["non-string requested version", JSON.stringify([validReport({ version: 1 })]), { name: "sandlot", version: 1 }],
+    ["non-stable requested version", JSON.stringify([validReport({ version: "0.1.0-rc.1" })]), { name: "sandlot", version: "0.1.0-rc.1" }],
     ["absolute filename", JSON.stringify([validReport({ filename: "/tmp/evil.tgz" })])],
     ["traversal filename", JSON.stringify([validReport({ filename: "../evil.tgz" })])],
     ["Windows traversal filename", JSON.stringify([validReport({ filename: "..\\evil.tgz" })])],
+    ["NUL filename", JSON.stringify([validReport({ filename: "sandlot\0evil.tgz" })])],
     ["non-tarball filename", JSON.stringify([validReport({ filename: "sandlot-0.1.0.zip" })])],
     ["zero size", JSON.stringify([validReport({ size: 0 })])],
     ["unbounded size", JSON.stringify([validReport({ size: 1024 * 1024 * 1024 + 1 })])],
     ["missing integrity", JSON.stringify([validReport({ integrity: undefined })])],
     ["wrong integrity algorithm", JSON.stringify([validReport({ integrity: "sha256-deadbeef" })])],
-  ])("rejects a %s pack report", (_reason, raw, expected = { name: "sandlot", version: "0.1.0" }) => {
+  ])("rejects a %s pack report", (_reason, raw, expected: unknown = { name: "sandlot", version: "0.1.0" }) => {
     // Weakening report validation could make the handoff name or checksum point outside the packed artifact.
     expect(() => parsePackReport(raw, expected)).toThrow();
   });
@@ -152,6 +156,33 @@ describe("release artifact builder", () => {
     }
   });
 
+  it("removes unexpected nested directories without following internal or escaping symlinks", async () => {
+    // Recursive cleanup that follows a pack-controlled symlink could delete files outside the private output directory.
+    const root = await mkdtemp(join(tmpdir(), "sandlot-artifact-nested-reject-"));
+    const outDir = join(root, "out");
+    const outside = join(root, "outside");
+    await Promise.all([mkdir(outDir, { mode: 0o700 }), mkdir(outside, { mode: 0o700 })]);
+    await writeFile(join(outside, "must-survive"), "outside");
+    const runner: PackRunner = async () => {
+      const nested = join(outDir, "unexpected", "nested");
+      await mkdir(nested, { recursive: true });
+      await Promise.all([
+        writeFile(join(outDir, TAR_NAME), TAR_BYTES),
+        writeFile(join(nested, "partial"), "partial"),
+        symlink("nested", join(outDir, "unexpected", "internal-link")),
+        symlink(outside, join(outDir, "unexpected", "escape-link")),
+      ]);
+      return { code: 0, stdout: JSON.stringify([validReport()]), stderr: "" };
+    };
+    try {
+      await expect(buildReleaseArtifact({ root: ROOT, version: "0.1.0", outDir, runPack: runner })).rejects.toThrow();
+      expect(await readdir(outDir)).toEqual([]);
+      await expect(readFile(join(outside, "must-survive"), "utf8")).resolves.toBe("outside");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("packs the built repository with its public documentation and entrypoints", async () => {
     // A builder that bypasses npm's real file selection could hand GitHub an incomplete package.
     const root = await mkdtemp(join(tmpdir(), "sandlot-artifact-real-"));
@@ -168,6 +199,8 @@ describe("release artifact builder", () => {
         "package/docs/assets/sandlot-logo.png",
         "package/dist/index.js",
         "package/dist/helpers/file-worker.js",
+        "package/dist/helpers/image-worker.js",
+        "package/dist/helpers/search-worker.js",
       ]));
       const { stdout: manifest } = await exec("tar", ["-xOf", join(outDir, handoff.tarball), "package/package.json"]);
       expect(JSON.parse(manifest).version).toBe("0.1.0");
