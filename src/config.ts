@@ -19,7 +19,10 @@ const TlsTerminateSchema = z.object({
   extraCaCertPaths: stringList.optional(),
 }).strict();
 
-const UserNetworkSchema = z.object({
+export type NetworkMode = "filtered" | "unrestricted";
+
+const FilteredUserNetworkSchema = z.object({
+  mode: z.literal("filtered").optional(),
   allowedDomains: domainList.optional(),
   deniedDomains: domainList.optional(),
   deniedDomainReasons: z.record(z.string()).optional(),
@@ -29,6 +32,12 @@ const UserNetworkSchema = z.object({
   allowMachLookup: stringList.optional(),
   tlsTerminate: TlsTerminateSchema.optional(),
 }).strict();
+
+const UnrestrictedUserNetworkSchema = z.object({
+  mode: z.literal("unrestricted"),
+}).strict();
+
+const UserNetworkSchema = z.union([FilteredUserNetworkSchema, UnrestrictedUserNetworkSchema]);
 
 const UserFilesystemSchema = z.object({
   disabled: z.boolean().optional(),
@@ -136,9 +145,22 @@ const ProjectPolicySchema = z.object({
 
 export type EnvironmentPolicy = z.infer<typeof EnvironmentPolicySchema>;
 type ParsedUserPolicy = z.infer<typeof UserPolicySchema>;
+type FilteredUserNetwork = z.infer<typeof FilteredUserNetworkSchema> & { strictAllowlist?: true };
+type UnrestrictedUserNetwork = z.infer<typeof UnrestrictedUserNetworkSchema>;
 export type UserPolicy = Omit<ParsedUserPolicy, "network"> & {
-  network?: NonNullable<ParsedUserPolicy["network"]> & { strictAllowlist?: true };
+  network?: FilteredUserNetwork | UnrestrictedUserNetwork;
 };
+type SecureNetworkDefaults = {
+  mode: "filtered";
+  allowedDomains: string[];
+  deniedDomains: string[];
+  strictAllowlist: true;
+  allowUnixSockets: string[];
+  allowAllUnixSockets: false;
+  allowLocalBinding: false;
+  allowMachLookup: string[];
+};
+type SecureUserDefaults = Omit<UserPolicy, "network"> & { network: SecureNetworkDefaults };
 export type ProjectPolicy = z.infer<typeof ProjectPolicySchema>;
 
 export class SandlotConfigError extends Error {
@@ -166,7 +188,7 @@ export function parseProjectPolicy(value: unknown, source = "project policy"): P
   return result.data;
 }
 
-export function secureUserDefaults(cwd: string, agentDir: string): UserPolicy {
+export function secureUserDefaults(cwd: string, agentDir: string): SecureUserDefaults {
   const piDir = dirname(agentDir);
   const conventionalPiDir = basename(agentDir) === "agent" && basename(piDir) === CONFIG_DIR_NAME
     ? piDir
@@ -243,6 +265,7 @@ export function secureUserDefaults(cwd: string, agentDir: string): UserPolicy {
   return {
     enabled: true,
     network: {
+      mode: "filtered",
       allowedDomains: [],
       deniedDomains: [],
       strictAllowlist: true,
@@ -293,8 +316,19 @@ function existingEnvironmentFiles(cwd: string): string[] {
 }
 
 function validateSandboxRuntimePolicy(policy: UserPolicy, source: string): void {
+  const userNetwork = policy.network;
+  let network: Record<string, unknown> = {};
+  if (userNetwork !== undefined && userNetwork.mode !== "unrestricted") {
+    const { mode: _mode, strictAllowlist: _strictAllowlist, ...filteredNetwork } = userNetwork;
+    network = filteredNetwork;
+  }
   const result = SandboxRuntimeConfigSchema.safeParse({
-    network: { allowedDomains: [], deniedDomains: [], ...policy.network },
+    network: {
+      allowedDomains: [],
+      deniedDomains: [],
+      ...network,
+      strictAllowlist: policy.network?.mode !== "unrestricted",
+    },
     filesystem: { denyRead: [], allowWrite: [], denyWrite: [], ...policy.filesystem },
     credentials: policy.credentials,
     enableWeakerNestedSandbox: policy.enableWeakerNestedSandbox,
