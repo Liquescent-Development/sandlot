@@ -6,6 +6,7 @@ describe("packed Sandlot release artifact", () => {
   let packed: Awaited<ReturnType<typeof packArtifact>>;
   let entries: string[];
   let readme: string;
+  let docs: Record<string, string>;
   let manifest: {
     scripts?: Record<string, string>;
     peerDependencies?: Record<string, string>;
@@ -21,6 +22,13 @@ describe("packed Sandlot release artifact", () => {
     if (listing.code !== 0) throw new Error(`tar listing failed: ${listing.stderr}`);
     entries = listing.stdout.trim().split("\n");
     readme = await readPackedText("package/README.md");
+    docs = Object.fromEntries(await Promise.all([
+      "configuration.md",
+      "security.md",
+      "diagnostics.md",
+      "development.md",
+      "releases.md",
+    ].map(async (name) => [name, await readPackedText(`package/docs/${name}`)])));
     manifest = JSON.parse(await readPackedText("package/package.json")) as typeof manifest;
 
     async function readPackedText(path: string): Promise<string> {
@@ -45,25 +53,28 @@ describe("packed Sandlot release artifact", () => {
       "package/dist/helpers/search-worker.js",
       "package/bin/mktemp",
       "package/README.md",
+      "package/CHANGELOG.md",
       "package/SPEC.md",
       "package/LICENSE",
       "package/scripts/pack-check.mjs",
+      "package/docs/configuration.md",
+      "package/docs/security.md",
+      "package/docs/diagnostics.md",
+      "package/docs/development.md",
+      "package/docs/releases.md",
+      "package/docs/assets/sandlot-logo.png",
     ]));
   });
 
-  it("documents every required operating and security contract", async () => {
-    for (const heading of [
-      "Installation",
-      "Threat model",
-      "Configuration",
-      "Diagnostics",
-      "Explicit disable",
-      "Limitations",
-    ]) {
-      expect(readme, `README is missing the ${heading} heading`).toMatch(
-        new RegExp(`^##\\s+${heading}$`, "im"),
-      );
-    }
+  it("keeps the packed quick start and detailed operating guides available", () => {
+    expect(readme.indexOf("## Quick start")).toBeLessThan(readme.indexOf("## How it works"));
+    expect(docs["configuration.md"]).toMatch(/^##\s+User policy$/m);
+    expect(docs["configuration.md"]).toMatch(/^##\s+Project policy$/m);
+    expect(docs["security.md"]).toMatch(/^##\s+Threat model$/m);
+    expect(docs["security.md"]).toMatch(/^##\s+Limitations$/m);
+    expect(docs["diagnostics.md"]).toMatch(/^##\s+Diagnostics$/m);
+    expect(docs["development.md"]).toMatch(/^##\s+Development$/m);
+    expect(docs["releases.md"]).toMatch(/^##\s+Release process$/m);
   });
 
   it("places the clean release build before every artifact smoke and never rebuilds afterward", () => {
@@ -82,13 +93,17 @@ describe("packed Sandlot release artifact", () => {
     expect(manifest.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe("0.84.2");
   });
 
-  it("ships JSON examples accepted by the real strict user and project parsers", () => {
-    const examples = [...readme.matchAll(/```json\s*\n([\s\S]*?)```/g)]
-      .map((match) => JSON.parse(match[1]!) as unknown);
-    expect(examples).toHaveLength(3);
-    expect(() => parseUserPolicy(examples[0], "packed README user example")).not.toThrow();
-    expect(() => parseProjectPolicy(examples[1], "packed README project example")).not.toThrow();
-    expect(() => parseUserPolicy(examples[2], "packed README disable example")).not.toThrow();
+  it("ships JSON policy examples accepted by the real strict parsers", () => {
+    const policyExamples = [...`${readme}\n${docs["configuration.md"]}`.matchAll(
+      /<!-- sandlot-policy: (user|project) -->\s*```json\s*\n([\s\S]*?)```/g,
+    )].map((match) => ({ kind: match[1]!, policy: JSON.parse(match[2]!) as unknown }));
+    const jsonExamples = [...`${readme}\n${docs["configuration.md"]}`.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+
+    expect(policyExamples).toHaveLength(jsonExamples.length);
+    for (const example of policyExamples) {
+      const parse = example.kind === "user" ? parseUserPolicy : parseProjectPolicy;
+      expect(() => parse(example.policy, `packed ${example.kind} policy example`)).not.toThrow();
+    }
   });
 
   it("tracks generated release entrypoints so pinned Pi Git installs can load", async () => {

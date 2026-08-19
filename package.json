@@ -10,6 +10,8 @@
     "bin/mktemp",
     "scripts/pack-check.mjs",
     "README.md",
+    "CHANGELOG.md",
+    "docs",
     "SPEC.md",
     "LICENSE"
   ],
