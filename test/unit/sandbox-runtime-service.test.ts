@@ -117,6 +117,89 @@ describe("Sandbox Runtime service protocol", () => {
     expect(manager.wrapWithSandboxArgv).not.toHaveBeenCalled();
   });
 
+  it("serializes reset and replacement initialization ahead of a stale unrestricted manager call", async () => {
+    const unrestrictedInitialized = deferred();
+    const filteredInitialized = deferred();
+    let managerNetworkMode: "filtered" | "unrestricted" | undefined;
+    const manager = serviceManager({
+      initialize: vi.fn(async (config: { network: { strictAllowlist: boolean } }) => {
+        if (config.network.strictAllowlist) {
+          await filteredInitialized.promise;
+          managerNetworkMode = "filtered";
+        } else {
+          await unrestrictedInitialized.promise;
+          managerNetworkMode = "unrestricted";
+        }
+      }),
+      reset: vi.fn(async () => { managerNetworkMode = undefined; }),
+    });
+    const unrestricted = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+    const filtered = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const staleInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config: unrestricted,
+      networkMode: "unrestricted",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(manager.initialize).toHaveBeenCalledOnce());
+    await handleSandboxRuntimeRequest(manager, "reset");
+    const replacementInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config: filtered,
+      networkMode: "filtered",
+    });
+    filteredInitialized.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const beforeStaleResolves = await handleSandboxRuntimeRequest(manager, "wrap", {
+      command: "true",
+      cwd: process.cwd(),
+    }).catch((error: unknown) => error);
+    unrestrictedInitialized.resolve();
+
+    await expect(staleInitialization).resolves.toBeInstanceOf(Error);
+    await expect(replacementInitialization).resolves.toBeUndefined();
+    expect(managerNetworkMode).toBe("filtered");
+    expect(beforeStaleResolves).toBeInstanceOf(Error);
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .resolves.toEqual({ argv: ["/bin/bash", "-c", "wrapped"] });
+  });
+
+  it("fails closed when the reset barrier behind an initializer fails", async () => {
+    const initialized = deferred();
+    const manager = serviceManager({
+      initialize: vi.fn(async () => { await initialized.promise; }),
+      reset: vi.fn(async () => { throw new Error("manager reset failure"); }),
+    });
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const staleInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(manager.initialize).toHaveBeenCalledOnce());
+    await handleSandboxRuntimeRequest(manager, "reset", undefined);
+    const replacementInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    }).catch((error: unknown) => error);
+    initialized.resolve();
+
+    await expect(staleInitialization).resolves.toBeInstanceOf(Error);
+    const replacementError = await replacementInitialization;
+    expect(replacementError).toBeInstanceOf(Error);
+    expect(String(replacementError)).toMatch(/reset failure/i);
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .rejects.toThrow(/initialized/i);
+    expect(manager.initialize).toHaveBeenCalledOnce();
+  });
+
   it("routes wrap ownership, cwd, cleanup, and command-scoped violations through SRT", async () => {
     const cwd = process.cwd();
     const violations = [{ line: "deny file-write /protected" }];

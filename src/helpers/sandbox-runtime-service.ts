@@ -42,6 +42,8 @@ interface ServiceManager {
 
 interface ServiceSessionState {
   lifecycleGeneration: number;
+  managerLifecycleTail: Promise<void>;
+  managerLifecycleBarrierError: Error | undefined;
   credentialEnvironment: NodeJS.ProcessEnv;
   config: SandboxRuntimeConfig | undefined;
   stagedNetworkMode: NetworkMode | undefined;
@@ -57,6 +59,8 @@ function serviceState(manager: ServiceManager): ServiceSessionState {
   if (state === undefined) {
     state = {
       lifecycleGeneration: 0,
+      managerLifecycleTail: Promise.resolve(),
+      managerLifecycleBarrierError: undefined,
       credentialEnvironment: Object.create(null) as NodeJS.ProcessEnv,
       config: undefined,
       stagedNetworkMode: undefined,
@@ -67,6 +71,18 @@ function serviceState(manager: ServiceManager): ServiceSessionState {
     serviceStates.set(manager, state);
   }
   return state;
+}
+
+function queueManagerLifecycle<T>(
+  state: ServiceSessionState,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  const queuedOperation = state.managerLifecycleTail.then(operation);
+  state.managerLifecycleTail = queuedOperation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queuedOperation;
 }
 
 type ServiceOperation =
@@ -220,11 +236,16 @@ async function dispatchSandboxRuntimeRequest(
       const initializationGeneration = state.lifecycleGeneration;
       state.initializingNetworkMode = networkMode;
       try {
-        await manager.initialize(
-          config,
-          networkMode === "unrestricted" ? allowAllNetwork : undefined,
-          record.enableLogMonitor === true,
-        );
+        await queueManagerLifecycle(state, async () => {
+          if (state.managerLifecycleBarrierError !== undefined) {
+            throw state.managerLifecycleBarrierError;
+          }
+          await manager.initialize(
+            config,
+            networkMode === "unrestricted" ? allowAllNetwork : undefined,
+            record.enableLogMonitor === true,
+          );
+        });
         if (state.lifecycleGeneration !== initializationGeneration) {
           throw new Error("Sandbox Runtime service initialization was cancelled by reset");
         }
@@ -304,6 +325,7 @@ async function dispatchSandboxRuntimeRequest(
     case "reset":
       requireNoPayload(payload, operation);
       const resetCredentialEnvironment = state.credentialEnvironment;
+      const resetOvertakesInitialization = state.initializingNetworkMode !== undefined;
       state.lifecycleGeneration++;
       state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
       state.config = undefined;
@@ -311,7 +333,21 @@ async function dispatchSandboxRuntimeRequest(
       state.initializingNetworkMode = undefined;
       state.initializedNetworkMode = undefined;
       try {
-        await manager.reset();
+        const resetManager = queueManagerLifecycle(state, async () => {
+          try {
+            await manager.reset();
+            state.managerLifecycleBarrierError = undefined;
+          } catch (error: unknown) {
+            const barrierError = redactCredentialError(error, resetCredentialEnvironment);
+            state.managerLifecycleBarrierError = barrierError;
+            throw barrierError;
+          }
+        });
+        if (resetOvertakesInitialization) {
+          void resetManager.catch(() => undefined);
+          return undefined;
+        }
+        await resetManager;
       } catch (error: unknown) {
         throw redactCredentialError(error, resetCredentialEnvironment);
       }
