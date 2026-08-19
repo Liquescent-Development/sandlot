@@ -81,7 +81,6 @@ Sandlot 0.1 supports macOS on x64 and arm64. Linux/Bubblewrap support is deferre
 - [Diagnostics](docs/diagnostics.md) — status, reload, and troubleshooting.
 - [Development](docs/development.md) — local setup and verification.
 - [Releases](docs/releases.md) — packaging and release checks.
-- [Specification](SPEC.md) — detailed implementation contract.
 - [Changelog](CHANGELOG.md) — released changes.
 
 ## Development

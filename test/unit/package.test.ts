@@ -13,13 +13,22 @@ describe("package metadata", () => {
     expect(pkg.devDependencies["@earendil-works/pi-coding-agent"]).toBe("0.84.2");
     expect(pkg.pi.extensions).toEqual(["./dist/index.js"]);
     expect(pkg.files).toEqual(expect.arrayContaining(["dist", "bin/mktemp"]));
+    expect(pkg.files).not.toContain("SPEC.md");
   });
 
-  it("declares Windows unsupported for v1", async () => {
-    const spec = await readFile(new URL("../../SPEC.md", import.meta.url), "utf8");
-    expect(spec).toContain("Windows is unsupported and out of scope for v1.");
-    expect(spec).not.toContain("### Windows");
-    expect(spec).not.toContain("Windows: the Sandbox Runtime dedicated user");
+  it("keeps the retired SPEC local-only and out of version control", async () => {
+    const tracked = spawnSync("git", ["ls-files", "--error-unmatch", "SPEC.md"], {
+      cwd: new URL("../..", import.meta.url),
+      encoding: "utf8",
+    });
+
+    expect(tracked.status).toBe(1);
+    expect(tracked.stdout).not.toContain("SPEC.md");
+  });
+
+  it("declares Windows unsupported for v1 in public documentation", async () => {
+    const readme = await readFile(new URL("../../README.md", import.meta.url), "utf8");
+    expect(readme).toMatch(/Windows is unsupported/i);
   });
 
   it("keeps the complete locked dependency tree valid for npm consumers", async () => {

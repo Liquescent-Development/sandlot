@@ -200,6 +200,44 @@ describe("Sandbox Runtime service protocol", () => {
     expect(manager.initialize).toHaveBeenCalledOnce();
   });
 
+  it("recovers after a failed reset barrier and a later successful reset", async () => {
+    const firstInitialization = deferred();
+    let initializeCalls = 0;
+    const manager = serviceManager({
+      initialize: vi.fn(async () => {
+        initializeCalls++;
+        if (initializeCalls === 1) await firstInitialization.promise;
+      }),
+      reset: vi.fn()
+        .mockRejectedValueOnce(new Error("first reset failure"))
+        .mockResolvedValueOnce(undefined),
+    });
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const staleInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    });
+    await vi.waitFor(() => expect(manager.initialize).toHaveBeenCalledOnce());
+    await handleSandboxRuntimeRequest(manager, "reset", undefined);
+    firstInitialization.resolve();
+    await expect(staleInitialization).rejects.toThrow(/reset|cancel/i);
+    await vi.waitFor(() => expect(manager.reset).toHaveBeenCalledTimes(1));
+
+    await expect(handleSandboxRuntimeRequest(manager, "reset", undefined)).resolves.toBeUndefined();
+    await expect(handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    })).resolves.toBeUndefined();
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .resolves.toEqual({ argv: ["/bin/bash", "-c", "wrapped"] });
+    expect(manager.reset).toHaveBeenCalledTimes(2);
+    expect(manager.initialize).toHaveBeenCalledTimes(2);
+  });
+
   it("routes wrap ownership, cwd, cleanup, and command-scoped violations through SRT", async () => {
     const cwd = process.cwd();
     const violations = [{ line: "deny file-write /protected" }];

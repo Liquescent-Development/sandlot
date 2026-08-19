@@ -1,5 +1,6 @@
 .worktrees/
 .superpowers/
+SPEC.md
 docs/superpowers/
 node_modules/
 coverage/

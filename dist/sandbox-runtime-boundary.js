@@ -144,7 +144,11 @@ export class SandboxRuntimeBoundary {
             throw new Error("Linux Sandbox Runtime requires an absolute pinned ripgrep command");
         }
         const credentialEnvironment = buildCredentialEnvironment(config, this.#hostEnvironment);
+        const updateGeneration = this.#lifecycleGeneration;
         await this.request("updateConfig", { config: this.withOperationalTemporaryGrant(config), networkMode, credentialEnvironment }, undefined, credentialValues(credentialEnvironment));
+        if (this.#lifecycleGeneration !== updateGeneration) {
+            throw new Error("Sandbox Runtime boundary config update was cancelled by reset");
+        }
         this.#ripgrepCommand = ripgrepCommand;
         this.#stagedNetworkMode = networkMode;
         this.bindCredentialPolicy(config, credentialEnvironment);

@@ -26,7 +26,7 @@ Use this exact user-policy object only when the trusted user intentionally needs
 
 `network.mode: "unrestricted"` removes only outbound host/domain filtering. It does not relax filesystem, process, environment, credential, Unix-socket, local-binding, or lifecycle protections. The filtered mode remains the default and retains its strict allowlist behavior, including denying outbound destinations when the allowlist is empty.
 
-This is trusted-user-only: project policy cannot select it. In this mode the `network` object must have no sibling fields, and any project `network` block is rejected. Because any sandbox-readable data can be sent to any destination, use this mode only for commands and inputs you trust. Injected credentials are unavailable; mask-mode credentials receive sentinel values and have no real injection target.
+This is trusted-user-only: project policy cannot select it. In this mode the `network` object must have no sibling fields, and any project `network` block is rejected. Because any sandbox-readable data can be sent to any destination, use this mode only for commands and inputs you trust. Credential injection is unavailable; mask-mode credentials receive sentinel values and have no real injection target.
 
 The strict user-policy object accepts these controls:
 
@@ -37,7 +37,9 @@ The strict user-policy object accepts these controls:
 - `environment` accepts `passThrough`, `deny`, and `exposePiSessionMetadata`.
 - `trustedCustomTools`, `enableWeakerNestedSandbox`, `enableWeakerNetworkIsolation`, `allowAppleEvents`, `ripgrep.command`, `seccomp.applyPath`, `seccomp.argv0`, `bwrapPath`, and `socatPath` control trusted extensions and platform/runtime integration.
 
-The full schema and composition semantics are in [SPEC.md](../SPEC.md).
+Sandlot validates every policy object strictly. User policy sets the permission
+ceiling; trusted project policy may only narrow it. Unknown keys, invalid JSON,
+and any attempted widening are errors that leave protected operations blocked.
 
 A secure user policy can permit one API and CI metadata while preserving the default credential deny list:
 

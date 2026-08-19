@@ -177,6 +177,63 @@ describe("SandboxRuntimeBoundary", () => {
     expect(transport.request).not.toHaveBeenCalledWith("wrap", expect.anything(), undefined);
   });
 
+  it("does not restore staged config when reset overtakes updateConfig", async () => {
+    const updated = deferred();
+    const firstTransport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation) => {
+        if (operation === "updateConfig") await updated.promise;
+        return undefined;
+      }),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const secondTransport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation) => operation === "wrap"
+        ? { argv: ["/bin/bash", "-c", "wrapped"], env: {} }
+        : undefined),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const createTransport = vi.fn()
+      .mockResolvedValueOnce(firstTransport)
+      .mockResolvedValueOnce(secondTransport);
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport,
+    });
+    const unrestricted: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+    const filtered: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    const update = boundary.updateConfig(unrestricted, "unrestricted");
+    await vi.waitFor(() => expect(firstTransport.request).toHaveBeenCalledWith(
+      "updateConfig",
+      expect.anything(),
+      undefined,
+    ));
+    await boundary.reset();
+    updated.resolve();
+
+    await expect(update).rejects.toThrow(/reset|cancel/i);
+    await boundary.open("/workspace");
+    await expect(boundary.initialize(filtered, undefined, false, "filtered")).resolves.toBeUndefined();
+    await expect(boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace"))
+      .resolves.toEqual({ argv: ["/bin/bash", "-c", "wrapped"], env: expect.any(Object) });
+    expect(secondTransport.request).toHaveBeenCalledWith("initialize", expect.objectContaining({
+      networkMode: "filtered",
+    }), undefined);
+    await boundary.reset();
+  });
+
   it("sends the explicit effective network mode through IPC without inferring it from SRT config", async () => {
     const requests: Array<{ operation: string; payload: unknown }> = [];
     const transport: SandboxRuntimeTransport = {

@@ -35,7 +35,6 @@ describe("public documentation", () => {
       "docs/diagnostics.md",
       "docs/development.md",
       "docs/releases.md",
-      "SPEC.md",
     ]) expect(readme).toContain(path);
   });
 
@@ -63,6 +62,34 @@ describe("public documentation", () => {
     }
   });
 
+  it("does not publish references to the local-only SPEC", async () => {
+    const publicDocumentation = await Promise.all([
+      read("README.md"),
+      read("docs/configuration.md"),
+      read("docs/security.md"),
+      read("docs/diagnostics.md"),
+      read("docs/development.md"),
+      read("docs/releases.md"),
+    ]);
+
+    for (const markdown of publicDocumentation) expect(markdown).not.toMatch(/\bSPEC(?:\.md)?\b/);
+  });
+
+  it("independently documents the trusted-user unrestricted network exception", async () => {
+    const publicNetworkDocumentation = await Promise.all([
+      read("README.md"),
+      read("docs/configuration.md"),
+      read("docs/security.md"),
+    ]);
+
+    for (const markdown of publicNetworkDocumentation) {
+      expect(markdown).toMatch(/network[\s\S]*mode[\s\S]*unrestricted/i);
+      expect(markdown).toMatch(/filtered[\s\S]*(?:default|strict)/i);
+      expect(markdown).toMatch(/project[\s\S]*network[\s\S]*reject/i);
+      expect(markdown).toMatch(/credential injection[\s\S]*unavailable/i);
+    }
+  });
+
   it("ships the supported docs, release notes, and official logo asset", async () => {
     for (const path of [
       "docs/configuration.md",
@@ -70,7 +97,6 @@ describe("public documentation", () => {
       "docs/diagnostics.md",
       "docs/development.md",
       "docs/releases.md",
-      "SPEC.md",
       "CHANGELOG.md",
     ]) {
       await expect(access(projectUrl(path))).resolves.toBeUndefined();
