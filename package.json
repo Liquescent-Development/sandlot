@@ -1,0 +1,43 @@
+{
+  "name": "sandlot",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist",
+    "bin/mktemp",
+    "scripts/pack-check.mjs",
+    "README.md",
+    "SPEC.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "shx rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "test": "vitest run --exclude 'test/integration/**' --exclude 'test/smoke/**'",
+    "test:integration": "vitest run --config vitest.integration.config.ts test/integration",
+    "test:smoke": "vitest run test/smoke",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pack:check": "node scripts/pack-check.mjs",
+    "prepublishOnly": "npm test && npm run typecheck && npm run build && npm run test:smoke",
+    "release:verify": "npm test && npm run typecheck && npm run build && SANDLOT_REQUIRE_INTEGRATION=1 npm run test:integration && npm run test:smoke && npm run pack:check"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.73",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "22.19.19",
+    "shx": "0.4.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

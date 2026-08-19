@@ -1,0 +1,57 @@
+name: Security integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-runtime:
+    name: Sandbox Runtime (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js 22.19.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          package-manager-cache: false
+
+      - name: Install macOS sandbox prerequisites
+        run: brew install ripgrep
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Unit and contract tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build package
+        run: npm run build
+
+      - name: Packed artifact, installed-enabled, and real Pi mode smoke tests
+        run: npm run test:smoke
+
+      - name: Required Seatbelt filesystem/network/process real-sandbox integration tests
+        env:
+          SANDLOT_REQUIRE_INTEGRATION: "1"
+        run: npm run test:integration
+
+      - name: Verify package contents
+        run: npm run pack:check
