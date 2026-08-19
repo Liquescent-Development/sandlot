@@ -110,6 +110,9 @@ describe("public documentation", () => {
     expect(readme).toMatch(/Seatbelt[\s\S]*Sandbox Runtime/i);
     expect(readme).toMatch(/Sandlot[\s\S]*policy composition[\s\S]*protected-tool routing[\s\S]*diagnostics/i);
     expect(readme).toMatch(/project writes[\s\S]*allowed[\s\S]*protected.*(?:configuration|security)/i);
+    expect(readme).toMatch(/writes outside the project are denied/i);
+    expect(readme).toMatch(/protected tools fail closed if Sandlot loses ownership or becomes unavailable/i);
+    expect(readme).toMatch(/^## Development[\s\S]*```bash\s*\nnpm run release:verify/m);
     expect(readme).toMatch(/explicitly install a newer.*tag/i);
     expect(configuration).toMatch(/^## Explicit disable$/m);
     expect(configuration).toMatch(/Warning:[\s\S]*disables the security boundary/i);

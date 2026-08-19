@@ -36,7 +36,7 @@ Launch Pi in a trusted project, then run `/sandlot`. A `🔒 Sandlot` footer and
 
 ### Secure defaults
 
-Sandlot denies network access, Unix sockets, local binding, Apple Events, weaker isolation, common credentials, and Pi state by default. Project writes inside the workspace are allowed except for protected configuration and security paths, including project `.pi` settings and Git security/configuration files. Project policy can narrow a trusted user's ceiling but cannot widen it. See the [security guide](docs/security.md) before allowing a network destination, credential, or custom tool.
+Sandlot denies network access, Unix sockets, local binding, Apple Events, weaker isolation, common credentials, and Pi state by default. Project writes inside the workspace are allowed except for protected configuration and security paths, including project `.pi` settings and Git security/configuration files. Writes outside the project are denied. Project policy can narrow a trusted user's ceiling but cannot widen it. See the [security guide](docs/security.md) before allowing a network destination, credential, or custom tool.
 
 ### Small configuration example
 
@@ -53,7 +53,7 @@ Remove the setting and run `/sandlot-reload` (or restart Pi) to restore sandboxi
 
 ## How it works
 
-Sandlot verifies and replaces Pi's `bash`, `read`, `write`, `edit`, `ls`, `find`, and `grep` tools, blocks untrusted custom tool calls, and starts an isolated Sandbox Runtime service for protected operations. The trusted host control plane still includes Pi, model-provider requests, configuration and session persistence, the TUI, Sandlot initialization, Sandbox Runtime, and installed Pi extensions. Sandlot is not a whole-Pi sandbox: an extension cannot retroactively sandbox its host process.
+Sandlot verifies and replaces Pi's `bash`, `read`, `write`, `edit`, `ls`, `find`, and `grep` tools, blocks untrusted custom tool calls, and starts an isolated Sandbox Runtime service for protected operations. Protected tools fail closed if Sandlot loses ownership or becomes unavailable. The trusted host control plane still includes Pi, model-provider requests, configuration and session persistence, the TUI, Sandlot initialization, Sandbox Runtime, and installed Pi extensions. Sandlot is not a whole-Pi sandbox: an extension cannot retroactively sandbox its host process.
 
 ## Supported platforms
 
@@ -71,7 +71,11 @@ Sandlot 0.1 supports macOS on x64 and arm64. Linux/Bubblewrap support is deferre
 
 ## Development
 
-For a local checkout, follow the [development guide](docs/development.md). Pi Git installations load the committed `dist` tree because Pi 0.84.2 does not run a TypeScript release build for Git sources.
+For a local checkout, follow the [development guide](docs/development.md). Pi Git installations load the committed `dist` tree because Pi 0.84.2 does not run a TypeScript release build for Git sources. The complete macOS release gate is:
+
+```bash
+npm run release:verify
+```
 
 ## License
 
