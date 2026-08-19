@@ -346,7 +346,11 @@ export async function createInitializedHarness(input: HarnessInitialization): Pr
         await manager.open(input.workspace);
         managerActive = true;
       }
-      await manager.updateConfig(next.config);
+      if (manager instanceof SandboxRuntimeBoundary) {
+        await manager.updateConfig(next.config, next.effective.networkMode);
+      } else {
+        await manager.updateConfig(next.config);
+      }
       if (process.platform === "linux") {
         const globWarnings = await manager.getLinuxGlobPatternWarnings();
         if (globWarnings.length > 0) {
@@ -365,7 +369,11 @@ export async function createInitializedHarness(input: HarnessInitialization): Pr
         throw new Error(`Sandbox Runtime cannot enforce Unix-socket denial: ${dependencies.warnings.join("; ")}`);
       }
       managerActive = true;
-      await manager.initialize(next.config, undefined, true);
+      if (manager instanceof SandboxRuntimeBoundary) {
+        await manager.initialize(next.config, undefined, true, next.effective.networkMode);
+      } else {
+        await manager.initialize(next.config, undefined, true);
+      }
       runtime.markReady(next.effective);
       activeKey = next.key;
     } catch (error) {
@@ -464,13 +472,21 @@ export async function createInitializedHarness(input: HarnessInitialization): Pr
           await manager.open(input.workspace);
           managerActive = true;
         }
-        await manager.updateConfig(bad);
+        if (manager instanceof SandboxRuntimeBoundary) {
+          await manager.updateConfig(bad, good.effective.networkMode);
+        } else {
+          await manager.updateConfig(bad);
+        }
         const dependencies = await manager.checkDependenciesAsync(good.config.ripgrep);
         if (dependencies.errors.length > 0) {
           throw new Error(`Sandbox Runtime dependencies unavailable: ${dependencies.errors.join("; ")}`);
         }
         managerActive = true;
-        await manager.initialize(bad, undefined, true);
+        if (manager instanceof SandboxRuntimeBoundary) {
+          await manager.initialize(bad, undefined, true, good.effective.networkMode);
+        } else {
+          await manager.initialize(bad, undefined, true);
+        }
       } catch (error) {
         initializationError = error;
       }

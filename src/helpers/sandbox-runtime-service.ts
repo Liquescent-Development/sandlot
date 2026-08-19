@@ -1,6 +1,7 @@
 import {
   SandboxManager,
   SandboxRuntimeConfigSchema,
+  type SandboxAskCallback,
   type SandboxRuntimeConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import { registerAwsPairs } from "@anthropic-ai/sandbox-runtime/dist/sandbox/credential-aws-pairs.js";
@@ -10,11 +11,16 @@ import { spawn } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serialize } from "node:v8";
+import type { NetworkMode } from "../config.js";
 
 interface ServiceManager {
   updateConfig(config: SandboxRuntimeConfig): void;
   checkDependenciesAsync(ripgrepConfig?: { command: string; args?: string[] }): Promise<unknown>;
-  initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+  initialize(
+    config: SandboxRuntimeConfig,
+    askCallback?: SandboxAskCallback,
+    enableLogMonitor?: boolean,
+  ): Promise<void>;
   wrapWithSandboxArgv(
     command: string,
     binShell?: string,
@@ -35,8 +41,14 @@ interface ServiceManager {
 }
 
 interface ServiceSessionState {
+  lifecycleGeneration: number;
+  managerLifecycleTail: Promise<void>;
+  managerLifecycleBarrierError: Error | undefined;
   credentialEnvironment: NodeJS.ProcessEnv;
   config: SandboxRuntimeConfig | undefined;
+  stagedNetworkMode: NetworkMode | undefined;
+  initializingNetworkMode: NetworkMode | undefined;
+  initializedNetworkMode: NetworkMode | undefined;
   activeOperations: number;
 }
 
@@ -46,13 +58,31 @@ function serviceState(manager: ServiceManager): ServiceSessionState {
   let state = serviceStates.get(manager);
   if (state === undefined) {
     state = {
+      lifecycleGeneration: 0,
+      managerLifecycleTail: Promise.resolve(),
+      managerLifecycleBarrierError: undefined,
       credentialEnvironment: Object.create(null) as NodeJS.ProcessEnv,
       config: undefined,
+      stagedNetworkMode: undefined,
+      initializingNetworkMode: undefined,
+      initializedNetworkMode: undefined,
       activeOperations: 0,
     };
     serviceStates.set(manager, state);
   }
   return state;
+}
+
+function queueManagerLifecycle<T>(
+  state: ServiceSessionState,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  const queuedOperation = state.managerLifecycleTail.then(operation);
+  state.managerLifecycleTail = queuedOperation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queuedOperation;
 }
 
 type ServiceOperation =
@@ -83,6 +113,7 @@ const MAX_IPC_DATA_DEPTH = 20;
 const MAX_IPC_DATA_NODES = 16_384;
 const MAX_CREDENTIAL_ENVIRONMENT_NAMES = 128;
 const MAX_CREDENTIAL_VALUE_BYTES = 256 * 1024;
+const allowAllNetwork: SandboxAskCallback = async () => true;
 
 interface ServiceRequestDependencies {
   readonly scanMandatoryDenyPaths: (
@@ -161,12 +192,22 @@ async function dispatchSandboxRuntimeRequest(
 ): Promise<unknown> {
   switch (operation) {
     case "updateConfig": {
-      const record = requiredPayloadRecord(payload, ["config", "credentialEnvironment"], ["config"]);
+      const record = requiredPayloadRecord(
+        payload,
+        ["config", "networkMode", "credentialEnvironment"],
+        ["config", "networkMode"],
+      );
       const config = requiredConfig(record.config);
+      const networkMode = requiredNetworkMode(record.networkMode);
+      assertNetworkModeConfigPair(networkMode, config);
+      if (state.initializingNetworkMode !== undefined || state.initializedNetworkMode !== undefined) {
+        throw new Error("Sandbox Runtime service config cannot change after initialization begins");
+      }
       const credentialEnvironment = requiredCredentialEnvironment(record.credentialEnvironment, config);
       manager.updateConfig(config);
       state.credentialEnvironment = credentialEnvironment;
       state.config = config;
+      state.stagedNetworkMode = networkMode;
       return undefined;
     }
     case "checkDependencies": {
@@ -176,17 +217,47 @@ async function dispatchSandboxRuntimeRequest(
     case "initialize": {
       const record = requiredPayloadRecord(
         payload,
-        ["config", "enableLogMonitor", "credentialEnvironment"],
-        ["config"],
+        ["config", "networkMode", "enableLogMonitor", "credentialEnvironment"],
+        ["config", "networkMode"],
       );
       const config = requiredConfig(record.config);
+      const networkMode = requiredNetworkMode(record.networkMode);
+      assertNetworkModeConfigPair(networkMode, config);
+      if (state.initializingNetworkMode !== undefined || state.initializedNetworkMode !== undefined) {
+        throw new Error("Sandbox Runtime service is already initialized");
+      }
+      if (state.stagedNetworkMode !== undefined && state.stagedNetworkMode !== networkMode) {
+        throw new Error("Sandbox Runtime service initialization network mode does not match staged config");
+      }
       const credentialEnvironment = requiredCredentialEnvironment(record.credentialEnvironment, config);
       if (record.enableLogMonitor !== undefined && typeof record.enableLogMonitor !== "boolean") {
         throw new Error("Sandbox Runtime service enableLogMonitor must be boolean");
       }
-      await manager.initialize(config, undefined, record.enableLogMonitor === true);
-      state.credentialEnvironment = credentialEnvironment;
-      state.config = config;
+      const initializationGeneration = state.lifecycleGeneration;
+      state.initializingNetworkMode = networkMode;
+      try {
+        await queueManagerLifecycle(state, async () => {
+          if (state.managerLifecycleBarrierError !== undefined) {
+            throw state.managerLifecycleBarrierError;
+          }
+          await manager.initialize(
+            config,
+            networkMode === "unrestricted" ? allowAllNetwork : undefined,
+            record.enableLogMonitor === true,
+          );
+        });
+        if (state.lifecycleGeneration !== initializationGeneration) {
+          throw new Error("Sandbox Runtime service initialization was cancelled by reset");
+        }
+        state.credentialEnvironment = credentialEnvironment;
+        state.config = config;
+        state.stagedNetworkMode = networkMode;
+        state.initializedNetworkMode = networkMode;
+      } finally {
+        if (state.lifecycleGeneration === initializationGeneration) {
+          state.initializingNetworkMode = undefined;
+        }
+      }
       return undefined;
     }
     case "wrap": {
@@ -195,6 +266,9 @@ async function dispatchSandboxRuntimeRequest(
         ["command", "binShell", "cwd", "options", "mandatoryScan"],
         ["command", "cwd"],
       );
+      if (state.initializedNetworkMode === undefined) {
+        throw new Error("Sandbox Runtime service cannot wrap before it has initialized");
+      }
       const wrapCwd = requiredAbsolutePath(record.cwd, "wrap cwd");
       if (record.mandatoryScan !== undefined) {
         const mandatoryScan = requiredPayloadRecord(
@@ -251,13 +325,31 @@ async function dispatchSandboxRuntimeRequest(
     case "reset":
       requireNoPayload(payload, operation);
       const resetCredentialEnvironment = state.credentialEnvironment;
+      const resetOvertakesInitialization = state.initializingNetworkMode !== undefined;
+      state.lifecycleGeneration++;
+      state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
+      state.config = undefined;
+      state.stagedNetworkMode = undefined;
+      state.initializingNetworkMode = undefined;
+      state.initializedNetworkMode = undefined;
       try {
-        await manager.reset();
+        const resetManager = queueManagerLifecycle(state, async () => {
+          try {
+            await manager.reset();
+            state.managerLifecycleBarrierError = undefined;
+          } catch (error: unknown) {
+            const barrierError = redactCredentialError(error, resetCredentialEnvironment);
+            state.managerLifecycleBarrierError = barrierError;
+            throw barrierError;
+          }
+        });
+        if (resetOvertakesInitialization) {
+          void resetManager.catch(() => undefined);
+          return undefined;
+        }
+        await resetManager;
       } catch (error: unknown) {
         throw redactCredentialError(error, resetCredentialEnvironment);
-      } finally {
-        state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
-        state.config = undefined;
       }
       return undefined;
   }
@@ -469,8 +561,13 @@ function startService(manager: ServiceManager): void {
     shuttingDown = true;
     for (const controller of active.values()) controller.abort();
     active.clear();
-    serviceState(manager).credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
-    serviceState(manager).config = undefined;
+    const state = serviceState(manager);
+    state.lifecycleGeneration++;
+    state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
+    state.config = undefined;
+    state.stagedNetworkMode = undefined;
+    state.initializingNetworkMode = undefined;
+    state.initializedNetworkMode = undefined;
     void withOperationDeadline(Promise.resolve().then(() => manager.reset()), "reset", 1_000)
       .catch(() => undefined)
       .finally(() => process.exit(exitCode));
@@ -662,6 +759,30 @@ function requiredConfig(value: unknown): SandboxRuntimeConfig {
   return SandboxRuntimeConfigSchema.parse(value);
 }
 
+function requiredNetworkMode(value: unknown): NetworkMode {
+  if (value === "filtered" || value === "unrestricted") return value;
+  throw new Error("Sandbox Runtime service network mode must be filtered or unrestricted");
+}
+
+function assertNetworkModeConfigPair(networkMode: NetworkMode, config: SandboxRuntimeConfig): void {
+  const network = config.network;
+  if (networkMode === "filtered") {
+    if (network.strictAllowlist !== true) {
+      throw new Error("Sandbox Runtime service filtered network mode requires strict allowlisting");
+    }
+    return;
+  }
+  if (
+    network.strictAllowlist !== false
+    || network.allowedDomains.length !== 0
+    || network.deniedDomains.length !== 0
+  ) {
+    throw new Error(
+      "Sandbox Runtime service unrestricted network mode requires strictAllowlist false and empty domain lists",
+    );
+  }
+}
+
 function requiredCredentialEnvironment(
   value: unknown,
   config: SandboxRuntimeConfig,
@@ -708,9 +829,9 @@ function credentialEnvironmentForRequest(
   const record = requiredPayloadRecord(
     payload,
     operation === "updateConfig"
-      ? ["config", "credentialEnvironment"]
-      : ["config", "enableLogMonitor", "credentialEnvironment"],
-    ["config"],
+      ? ["config", "networkMode", "credentialEnvironment"]
+      : ["config", "networkMode", "enableLogMonitor", "credentialEnvironment"],
+    ["config", "networkMode"],
   );
   return requiredCredentialEnvironment(record.credentialEnvironment, requiredConfig(record.config));
 }

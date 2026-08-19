@@ -7,19 +7,32 @@ import { describe, expect, it } from "vitest";
 describe("package metadata", () => {
   it("pins the security boundary and publishes the compiled Pi entry", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+    const lock = JSON.parse(await readFile(new URL("../../package-lock.json", import.meta.url), "utf8"));
+    expect(pkg.version).toBe("0.2.0");
+    expect(lock.version).toBe("0.2.0");
+    expect(lock.packages[""].version).toBe("0.2.0");
     expect(pkg.engines.node).toBe(">=22.19.0");
     expect(pkg.dependencies["@anthropic-ai/sandbox-runtime"]).toBe("0.0.73");
     expect(pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBeUndefined();
     expect(pkg.devDependencies["@earendil-works/pi-coding-agent"]).toBe("0.84.2");
     expect(pkg.pi.extensions).toEqual(["./dist/index.js"]);
     expect(pkg.files).toEqual(expect.arrayContaining(["dist", "bin/mktemp"]));
+    expect(pkg.files).not.toContain("SPEC.md");
   });
 
-  it("declares Windows unsupported for v1", async () => {
-    const spec = await readFile(new URL("../../SPEC.md", import.meta.url), "utf8");
-    expect(spec).toContain("Windows is unsupported and out of scope for v1.");
-    expect(spec).not.toContain("### Windows");
-    expect(spec).not.toContain("Windows: the Sandbox Runtime dedicated user");
+  it("keeps the retired SPEC local-only and out of version control", async () => {
+    const tracked = spawnSync("git", ["ls-files", "--error-unmatch", "SPEC.md"], {
+      cwd: new URL("../..", import.meta.url),
+      encoding: "utf8",
+    });
+
+    expect(tracked.status).toBe(1);
+    expect(tracked.stdout).not.toContain("SPEC.md");
+  });
+
+  it("declares Windows unsupported for v1 in public documentation", async () => {
+    const readme = await readFile(new URL("../../README.md", import.meta.url), "utf8");
+    expect(readme).toMatch(/Windows is unsupported/i);
   });
 
   it("keeps the complete locked dependency tree valid for npm consumers", async () => {

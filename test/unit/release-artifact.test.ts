@@ -189,7 +189,7 @@ describe("release artifact builder", () => {
     const outDir = join(root, "out");
     await mkdir(outDir, { mode: 0o700 });
     try {
-      const handoff = await buildReleaseArtifact({ root: ROOT, version: "0.1.0", outDir });
+      const handoff = await buildReleaseArtifact({ root: ROOT, version: "0.2.0", outDir });
       const { stdout } = await exec("tar", ["-tzf", join(outDir, handoff.tarball)]);
       const entries = stdout.trim().split("\n");
       expect(entries).toEqual(expect.arrayContaining([
@@ -203,7 +203,7 @@ describe("release artifact builder", () => {
         "package/dist/helpers/search-worker.js",
       ]));
       const { stdout: manifest } = await exec("tar", ["-xOf", join(outDir, handoff.tarball), "package/package.json"]);
-      expect(JSON.parse(manifest).version).toBe("0.1.0");
+      expect(JSON.parse(manifest).version).toBe("0.2.0");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

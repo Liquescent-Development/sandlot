@@ -12,13 +12,13 @@ import { type ResolvedExtensionTrustPaths } from "./trust.js";
 export { resolveExtensionTrustPaths } from "./trust.js";
 interface ExtensionSandboxManager extends SandboxManagerLike {
     open(cwd: string): Promise<void>;
-    updateConfig(config: SandboxRuntimeConfig): Promise<void>;
+    updateConfig(config: SandboxRuntimeConfig, networkMode?: EffectivePolicy["networkMode"]): Promise<void>;
     getLinuxGlobPatternWarnings(): Promise<string[]>;
     checkDependenciesAsync(ripgrepConfig?: {
         command: string;
         args?: string[];
     }): Promise<SandboxDependencyCheck>;
-    initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+    initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean, networkMode?: EffectivePolicy["networkMode"]): Promise<void>;
     reset(): Promise<void>;
     getSandboxViolationStore(): SandboxManagerLike["getSandboxViolationStore"] extends (...args: never[]) => infer T ? T & {
         clear(): void;

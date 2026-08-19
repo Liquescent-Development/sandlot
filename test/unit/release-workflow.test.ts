@@ -46,13 +46,13 @@ describe("stable release workflow", () => {
       const result = spawnSync("/bin/bash", ["-c", stepScript(workflow, "Generate validated release metadata")], {
         cwd: new URL("../..", import.meta.url),
         encoding: "utf8",
-        env: { ...process.env, RUNNER_TEMP: runnerTemp, RELEASE_VERSION: "0.1.0" },
+        env: { ...process.env, RUNNER_TEMP: runnerTemp, RELEASE_VERSION: "0.2.0" },
       });
       expect(result.status, result.stderr).toBe(0);
       const metadataRoot = join(runnerTemp, "sandlot-release", "metadata");
       expect(JSON.parse(await readFile(join(metadataRoot, "release-metadata.json"), "utf8"))).toEqual({
-        version: "0.1.0",
-        tag: "v0.1.0",
+        version: "0.2.0",
+        tag: "v0.2.0",
         notesFile: "release-notes.md",
       });
       expect((await stat(join(metadataRoot, "release-notes.md"))).mode & 0o777).toBe(0o600);

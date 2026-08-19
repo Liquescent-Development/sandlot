@@ -4,13 +4,33 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { URL } from "node:url";
-import { SandlotConfigError, secureUserDefaults, type EnvironmentPolicy, type ProjectPolicy, type UserPolicy } from "./config.js";
+import { SandlotConfigError, secureUserDefaults, type EnvironmentPolicy, type NetworkMode, type ProjectPolicy, type UserPolicy } from "./config.js";
 import { canonicalizePolicyPath, isPathContained } from "./paths.js";
 
-type EffectiveNetworkConfig = Omit<NetworkConfig, "strictAllowlist"> & { strictAllowlist: true };
+type EffectiveNetworkConfig = Omit<NetworkConfig, "strictAllowlist"> & { strictAllowlist: boolean };
+type MergedNetworkConfig = {
+  mode: NetworkMode;
+  allowedDomains: string[];
+  deniedDomains: string[];
+  deniedDomainReasons?: Record<string, string>;
+  strictAllowlist: boolean;
+  allowUnixSockets: string[];
+  allowAllUnixSockets: boolean;
+  allowLocalBinding: boolean;
+  allowMachLookup: string[];
+  tlsTerminate?: NetworkConfig["tlsTerminate"];
+};
+type MergedUserPolicy = Omit<UserPolicy, "enabled" | "network" | "filesystem" | "credentials" | "environment"> & {
+  enabled: boolean;
+  network: MergedNetworkConfig;
+  filesystem: NonNullable<UserPolicy["filesystem"]>;
+  credentials: NonNullable<UserPolicy["credentials"]> | undefined;
+  environment: EnvironmentPolicy;
+};
 
 export interface EffectivePolicy {
   enabled: boolean;
+  networkMode: NetworkMode;
   network: EffectiveNetworkConfig;
   filesystem: FilesystemConfig;
   credentials: NonNullable<UserPolicy["credentials"]> | undefined;
@@ -61,10 +81,24 @@ export async function composePolicy(
   );
   const merged = await protectGitWorktreeMetadata(mergeUserPolicy(user, context), context.cwd);
   const trusted = await canonicalizeTrustedSecurityPaths(merged, context.cwd);
+  if (trusted.network.mode === "unrestricted" && project?.network !== undefined) {
+    throw new SandlotConfigError(
+      "project policy",
+      "network cannot be configured when the trusted user selects network.mode: unrestricted",
+    );
+  }
   const userFilesystem = await canonicalizeFilesystem(trusted.filesystem, context.cwd, "user filesystem");
   const projectFilesystem = project?.filesystem === undefined
     ? undefined
     : await canonicalizeFilesystem(project.filesystem, context.cwd, "project filesystem");
+  const credentials = credentialsForRuntime(
+    await canonicalizeCredentialFiles(
+      trusted.credentials,
+      context.cwd,
+      canonicalCustomCredentialFiles,
+    ),
+    trusted.network.mode,
+  );
   const userSockets = await canonicalizePaths(trusted.network.allowUnixSockets, context.cwd, "network.allowUnixSockets");
   const projectSockets = await canonicalizePaths(project?.network?.allowUnixSockets, context.cwd, "network.allowUnixSockets");
 
@@ -93,11 +127,12 @@ export async function composePolicy(
 
   const effective: EffectivePolicy = {
     enabled: trusted.enabled,
+    networkMode: trusted.network.mode,
     network: {
       allowedDomains,
       deniedDomains: stableUnion(trusted.network.deniedDomains, projectNetwork?.deniedDomains),
       deniedDomainReasons: trusted.network.deniedDomainReasons,
-      strictAllowlist: true,
+      strictAllowlist: trusted.network.mode !== "unrestricted",
       allowUnixSockets,
       allowAllUnixSockets: disableOnly(trusted.network.allowAllUnixSockets, projectNetwork?.allowAllUnixSockets, "network.allowAllUnixSockets"),
       allowLocalBinding: disableOnly(trusted.network.allowLocalBinding, projectNetwork?.allowLocalBinding, "network.allowLocalBinding"),
@@ -112,11 +147,7 @@ export async function composePolicy(
       denyWrite: stableUnion(userFilesystem.denyWrite, projectFilesystem?.denyWrite),
       allowGitConfig: disableOnly(userFilesystem.allowGitConfig, projectFilesystem?.allowGitConfig, "filesystem.allowGitConfig"),
     },
-    credentials: await canonicalizeCredentialFiles(
-      trusted.credentials,
-      context.cwd,
-      canonicalCustomCredentialFiles,
-    ),
+    credentials,
     environment: trusted.environment,
     trustedCustomTools,
     enableWeakerNestedSandbox: disableOnly(trusted.enableWeakerNestedSandbox, project?.enableWeakerNestedSandbox, "enableWeakerNestedSandbox"),
@@ -211,17 +242,20 @@ async function requiredGitRealpath(path: string, label: string): Promise<string>
 }
 
 export function toSandboxRuntimeConfig(effective: EffectivePolicy): SandboxRuntimeConfig {
+  const tlsTerminate = effective.networkMode === "unrestricted" && hasMaskedCredentials(effective.credentials)
+    ? {}
+    : effective.network.tlsTerminate;
   return SandboxRuntimeConfigSchema.parse({
     network: {
       allowedDomains: effective.network.allowedDomains,
       deniedDomains: effective.network.deniedDomains,
       deniedDomainReasons: effective.network.deniedDomainReasons,
-      strictAllowlist: true,
+      strictAllowlist: effective.networkMode !== "unrestricted",
       allowUnixSockets: effective.network.allowUnixSockets,
       allowAllUnixSockets: effective.network.allowAllUnixSockets,
       allowLocalBinding: effective.network.allowLocalBinding,
       allowMachLookup: effective.network.allowMachLookup,
-      tlsTerminate: effective.network.tlsTerminate,
+      ...(tlsTerminate === undefined ? {} : { tlsTerminate }),
     },
     filesystem: effective.filesystem,
     credentials: effective.credentials,
@@ -274,9 +308,17 @@ function containsGlobCharacters(path: string): boolean {
   return /[*?\[]/.test(path);
 }
 
-function mergeUserPolicy(user: UserPolicy, context: PolicyCompositionContext) {
+function mergeUserPolicy(user: UserPolicy, context: PolicyCompositionContext): MergedUserPolicy {
   const defaults = secureUserDefaults(context.cwd, context.agentDir ?? getAgentDir());
-  const network = { ...defaults.network, ...user.network, strictAllowlist: true };
+  const network: MergedNetworkConfig = user.network?.mode === "unrestricted"
+    ? {
+      ...defaults.network,
+      mode: "unrestricted",
+      allowedDomains: [],
+      deniedDomains: [],
+      strictAllowlist: false,
+    }
+    : { ...defaults.network, ...user.network, mode: "filtered", strictAllowlist: true };
   const filesystem = { ...defaults.filesystem, ...user.filesystem };
   const credentials = user.credentials === undefined
     ? defaults.credentials
@@ -321,7 +363,7 @@ async function canonicalizeTrustedSecurityPaths(
 }
 
 async function canonicalizeTlsTerminate(
-  tlsTerminate: NonNullable<UserPolicy["network"]>["tlsTerminate"],
+  tlsTerminate: NetworkConfig["tlsTerminate"] | undefined,
   cwd: string,
 ) {
   if (tlsTerminate === undefined) return undefined;
@@ -454,6 +496,12 @@ function validateCredentialInjectionCoverage(effective: EffectivePolicy): void {
     ...(effective.credentials?.envVars ?? []).map((entry, index) => ({ injectHosts: entry.injectHosts, field: `credentials.envVars[${index}].injectHosts` })),
   ];
   for (const source of sources) {
+    if (effective.networkMode === "unrestricted" && (source.injectHosts?.length ?? 0) > 0) {
+      throw new SandlotConfigError(
+        "user policy",
+        `${source.field} cannot be used when network.mode is unrestricted; injected credentials require a filtered network allowlist`,
+      );
+    }
     for (const host of source.injectHosts ?? []) {
       const hostPattern = parseDomainPattern(host).host;
       if (!effective.network.allowedDomains.some((allowed) => domainPatternCovers(parseDomainPattern(allowed).host, hostPattern))) {
@@ -461,6 +509,28 @@ function validateCredentialInjectionCoverage(effective: EffectivePolicy): void {
       }
     }
   }
+}
+
+function credentialsForRuntime(
+  credentials: NonNullable<UserPolicy["credentials"]> | undefined,
+  networkMode: NetworkMode,
+): NonNullable<UserPolicy["credentials"]> | undefined {
+  if (networkMode !== "unrestricted" || credentials === undefined) return credentials;
+  for (const [kind, entries] of [["files", credentials.files], ["envVars", credentials.envVars]] as const) {
+    for (const [index, entry] of (entries ?? []).entries()) {
+      if (entry.injectHosts !== undefined) {
+        throw new SandlotConfigError(
+          "user policy",
+          `credentials.${kind}[${index}].injectHosts cannot be used when network.mode is unrestricted; injected credentials require a filtered network allowlist`,
+        );
+      }
+    }
+  }
+  return credentials;
+}
+
+function hasMaskedCredentials(credentials: NonNullable<UserPolicy["credentials"]> | undefined): boolean {
+  return [...(credentials?.files ?? []), ...(credentials?.envVars ?? [])].some((entry) => entry.mode === "mask");
 }
 
 function parseDomainPattern(pattern: string): ParsedDomainPattern {

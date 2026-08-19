@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { serialize } from "node:v8";
 import type { SandboxDependencyCheck, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { buildOuterEnvironment, buildSandboxedChildCommand } from "./environment.js";
+import type { NetworkMode } from "./config.js";
 import type {
   SandboxExecutionTerminationGate,
   SandboxViolationLike,
@@ -111,8 +112,12 @@ export class SandboxRuntimeBoundary {
   #serviceTerminationRequiredGeneration = 0;
   #serviceTerminationConfirmedGeneration = 0;
   #resetAttempt: Promise<void> | undefined;
+  #lifecycleGeneration = 0;
   #cwd: string | undefined;
   #ripgrepCommand: string | undefined;
+  #stagedNetworkMode: NetworkMode | undefined;
+  #initializingNetworkMode: NetworkMode | undefined;
+  #initializedNetworkMode: NetworkMode | undefined;
   #credentialNames = new Set<string>();
   #credentialValues: string[] = [];
   #poisonedError: Error | undefined;
@@ -205,19 +210,27 @@ export class SandboxRuntimeBoundary {
     });
   }
 
-  async updateConfig(config: SandboxRuntimeConfig): Promise<void> {
+  async updateConfig(config: SandboxRuntimeConfig, networkMode: NetworkMode = "filtered"): Promise<void> {
+    if (this.#initializingNetworkMode !== undefined || this.#initializedNetworkMode !== undefined) {
+      throw new Error("Sandbox Runtime boundary config cannot change after initialization begins");
+    }
     const ripgrepCommand = config.ripgrep?.command;
     if (this.options.platform === "linux" && (ripgrepCommand === undefined || !isAbsolute(ripgrepCommand))) {
       throw new Error("Linux Sandbox Runtime requires an absolute pinned ripgrep command");
     }
     const credentialEnvironment = buildCredentialEnvironment(config, this.#hostEnvironment);
+    const updateGeneration = this.#lifecycleGeneration;
     await this.request(
       "updateConfig",
-      { config: this.withOperationalTemporaryGrant(config), credentialEnvironment },
+      { config: this.withOperationalTemporaryGrant(config), networkMode, credentialEnvironment },
       undefined,
       credentialValues(credentialEnvironment),
     );
+    if (this.#lifecycleGeneration !== updateGeneration) {
+      throw new Error("Sandbox Runtime boundary config update was cancelled by reset");
+    }
     this.#ripgrepCommand = ripgrepCommand;
+    this.#stagedNetworkMode = networkMode;
     this.bindCredentialPolicy(config, credentialEnvironment);
   }
 
@@ -225,15 +238,44 @@ export class SandboxRuntimeBoundary {
     return this.request("checkDependencies", { ripgrepConfig });
   }
 
-  async initialize(config: SandboxRuntimeConfig, _askCallback?: undefined, enableLogMonitor = false): Promise<void> {
+  async initialize(
+    config: SandboxRuntimeConfig,
+    _askCallback?: undefined,
+    enableLogMonitor = false,
+    networkMode: NetworkMode = "filtered",
+  ): Promise<void> {
+    if (this.#initializingNetworkMode !== undefined || this.#initializedNetworkMode !== undefined) {
+      throw new Error("Sandbox Runtime boundary is already initialized");
+    }
+    if (this.#stagedNetworkMode !== undefined && this.#stagedNetworkMode !== networkMode) {
+      throw new Error("Sandbox Runtime boundary initialization network mode does not match staged config");
+    }
     const credentialEnvironment = buildCredentialEnvironment(config, this.#hostEnvironment);
-    await this.request(
-      "initialize",
-      { config: this.withOperationalTemporaryGrant(config), enableLogMonitor, credentialEnvironment },
-      undefined,
-      credentialValues(credentialEnvironment),
-    );
-    this.bindCredentialPolicy(config, credentialEnvironment);
+    const initializationGeneration = this.#lifecycleGeneration;
+    this.#initializingNetworkMode = networkMode;
+    try {
+      await this.request(
+        "initialize",
+        {
+          config: this.withOperationalTemporaryGrant(config),
+          networkMode,
+          enableLogMonitor,
+          credentialEnvironment,
+        },
+        undefined,
+        credentialValues(credentialEnvironment),
+      );
+      if (this.#lifecycleGeneration !== initializationGeneration) {
+        throw new Error("Sandbox Runtime boundary initialization was cancelled by reset");
+      }
+      this.#stagedNetworkMode = networkMode;
+      this.#initializedNetworkMode = networkMode;
+      this.bindCredentialPolicy(config, credentialEnvironment);
+    } finally {
+      if (this.#lifecycleGeneration === initializationGeneration) {
+        this.#initializingNetworkMode = undefined;
+      }
+    }
   }
 
   async wrapWithSandboxArgv(
@@ -244,6 +286,9 @@ export class SandboxRuntimeBoundary {
     cwd?: string,
     options?: BoundaryWrapOptions,
   ): Promise<WrapDescriptor> {
+    if (this.#initializedNetworkMode === undefined) {
+      throw new Error("Sandbox Runtime boundary cannot wrap before it has initialized");
+    }
     const shellPath = binShell ?? "/bin/bash";
     const childEnvironment = withOperationalTemporaryEnvironment(
       withoutCredentialEnvironment(options?.childEnvironment ?? {}, this.#credentialNames),
@@ -327,8 +372,12 @@ export class SandboxRuntimeBoundary {
     const activeService = service?.active === true ? service : undefined;
     // Detach atomically while retaining the exact transport in #service.
     if (activeService !== undefined) activeService.active = false;
+    this.#lifecycleGeneration++;
     this.#cwd = undefined;
     this.#ripgrepCommand = undefined;
+    this.#stagedNetworkMode = undefined;
+    this.#initializingNetworkMode = undefined;
+    this.#initializedNetworkMode = undefined;
     this.#violations.clearLocal();
     this.#credentialNames.clear();
     const failures: unknown[] = [];

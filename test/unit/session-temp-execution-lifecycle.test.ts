@@ -47,6 +47,7 @@ describe("session temporary-directory execution lifecycle", () => {
     const runner = new SandboxRunner(boundary, readyRuntime(), { platform: "linux" });
 
     await boundary.open("/tmp");
+    await initializeBoundary(boundary);
     try {
       const outcome = await runner.run({
         invocationId: "literal-final-request-command",
@@ -134,6 +135,7 @@ describe("session temporary-directory execution lifecycle", () => {
     });
 
     await boundary.open("/tmp");
+    await initializeBoundary(boundary);
     const running = runner.run({
       invocationId: "literal-active-command",
       command: "while :; do sleep 1; done",
@@ -175,6 +177,13 @@ describe("session temporary-directory execution lifecycle", () => {
     }
   }, 10_000);
 });
+
+async function initializeBoundary(boundary: SandboxRuntimeBoundary): Promise<void> {
+  await boundary.initialize({
+    network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+    filesystem: { denyRead: [], allowWrite: ["/tmp"], denyWrite: [] },
+  });
+}
 
 function readyRuntime(): RuntimeController {
   const runtime = new RuntimeController();

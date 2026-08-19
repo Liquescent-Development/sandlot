@@ -16,7 +16,8 @@ const TlsTerminateSchema = z.object({
     excludeDomains: domainList.optional(),
     extraCaCertPaths: stringList.optional(),
 }).strict();
-const UserNetworkSchema = z.object({
+const FilteredUserNetworkSchema = z.object({
+    mode: z.literal("filtered").optional(),
     allowedDomains: domainList.optional(),
     deniedDomains: domainList.optional(),
     deniedDomainReasons: z.record(z.string()).optional(),
@@ -26,6 +27,10 @@ const UserNetworkSchema = z.object({
     allowMachLookup: stringList.optional(),
     tlsTerminate: TlsTerminateSchema.optional(),
 }).strict();
+const UnrestrictedUserNetworkSchema = z.object({
+    mode: z.literal("unrestricted"),
+}).strict();
+const UserNetworkSchema = z.union([FilteredUserNetworkSchema, UnrestrictedUserNetworkSchema]);
 const UserFilesystemSchema = z.object({
     disabled: z.boolean().optional(),
     denyRead: stringList.optional(),
@@ -220,6 +225,7 @@ export function secureUserDefaults(cwd, agentDir) {
     return {
         enabled: true,
         network: {
+            mode: "filtered",
             allowedDomains: [],
             deniedDomains: [],
             strictAllowlist: true,
@@ -270,10 +276,23 @@ function existingEnvironmentFiles(cwd) {
     }
 }
 function validateSandboxRuntimePolicy(policy, source) {
+    const userNetwork = policy.network;
+    let network = {};
+    if (userNetwork !== undefined && userNetwork.mode !== "unrestricted") {
+        const { mode: _mode, strictAllowlist: _strictAllowlist, ...filteredNetwork } = userNetwork;
+        network = filteredNetwork;
+    }
+    const credentials = credentialsForRuntime(policy.credentials, policy.network?.mode, source);
     const result = SandboxRuntimeConfigSchema.safeParse({
-        network: { allowedDomains: [], deniedDomains: [], ...policy.network },
+        network: {
+            allowedDomains: [],
+            deniedDomains: [],
+            ...network,
+            strictAllowlist: policy.network?.mode !== "unrestricted",
+            ...(policy.network?.mode === "unrestricted" && hasMaskedCredentials(credentials) ? { tlsTerminate: {} } : {}),
+        },
         filesystem: { denyRead: [], allowWrite: [], denyWrite: [], ...policy.filesystem },
-        credentials: policy.credentials,
+        credentials,
         enableWeakerNestedSandbox: policy.enableWeakerNestedSandbox,
         enableWeakerNetworkIsolation: policy.enableWeakerNetworkIsolation,
         allowAppleEvents: policy.allowAppleEvents,
@@ -284,6 +303,21 @@ function validateSandboxRuntimePolicy(policy, source) {
     });
     if (!result.success)
         throw new SandlotConfigError(source, formatIssues(result.error));
+}
+function credentialsForRuntime(credentials, networkMode, source) {
+    if (networkMode !== "unrestricted" || credentials === undefined)
+        return credentials;
+    for (const [kind, entries] of [["files", credentials.files], ["envVars", credentials.envVars]]) {
+        for (const [index, entry] of (entries ?? []).entries()) {
+            if (entry.injectHosts !== undefined) {
+                throw new SandlotConfigError(source, `credentials.${kind}[${index}].injectHosts cannot be used when network.mode is unrestricted; injected credentials require a filtered network allowlist`);
+            }
+        }
+    }
+    return credentials;
+}
+function hasMaskedCredentials(credentials) {
+    return [...(credentials?.files ?? []), ...(credentials?.envVars ?? [])].some((entry) => entry.mode === "mask");
 }
 function validateProjectRuntimePolicy(policy, source) {
     if (policy.network) {

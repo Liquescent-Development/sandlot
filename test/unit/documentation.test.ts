@@ -22,8 +22,15 @@ describe("public documentation", () => {
 
     expect(readme).toContain("docs/assets/sandlot-logo.png");
     expect(readme).toContain("anthropic-experimental/sandbox-runtime");
-    expect(readme).toContain("pi install git:github.com/Liquescent-Development/sandlot@v0.1.0");
+    expect(readme).toContain("pi install git:github.com/Liquescent-Development/sandlot@v0.2.0");
     expect(readme.indexOf("## Quick start")).toBeLessThan(readme.indexOf("## How it works"));
+    const quickStart = readme.slice(readme.indexOf("## Quick start"), readme.indexOf("### Secure defaults"));
+    expect(quickStart).toContain("~/.pi/agent/sandlot.json");
+    expect(quickStart).toContain("<project>/.pi/sandlot.json");
+    expect(quickStart).toMatch(/trusted user[\s\S]*(?:ceiling|maximum)/i);
+    expect(quickStart).toMatch(/project[\s\S]*(?:narrow|restrict)/i);
+    expect(quickStart).toContain("docs/configuration.md");
+    expect(quickStart).toContain("/sandlot-reload");
     expect(readme).toContain("macOS");
     expect(readme).toMatch(/Linux[\s\S]*(deferred|unsupported)/i);
     expect(readme).toMatch(/not a whole-Pi sandbox/i);
@@ -35,7 +42,6 @@ describe("public documentation", () => {
       "docs/diagnostics.md",
       "docs/development.md",
       "docs/releases.md",
-      "SPEC.md",
     ]) expect(readme).toContain(path);
   });
 
@@ -63,6 +69,34 @@ describe("public documentation", () => {
     }
   });
 
+  it("does not publish references to the local-only SPEC", async () => {
+    const publicDocumentation = await Promise.all([
+      read("README.md"),
+      read("docs/configuration.md"),
+      read("docs/security.md"),
+      read("docs/diagnostics.md"),
+      read("docs/development.md"),
+      read("docs/releases.md"),
+    ]);
+
+    for (const markdown of publicDocumentation) expect(markdown).not.toMatch(/\bSPEC(?:\.md)?\b/);
+  });
+
+  it("independently documents the trusted-user unrestricted network exception", async () => {
+    const publicNetworkDocumentation = await Promise.all([
+      read("README.md"),
+      read("docs/configuration.md"),
+      read("docs/security.md"),
+    ]);
+
+    for (const markdown of publicNetworkDocumentation) {
+      expect(markdown).toMatch(/network[\s\S]*mode[\s\S]*unrestricted/i);
+      expect(markdown).toMatch(/filtered[\s\S]*(?:default|strict)/i);
+      expect(markdown).toMatch(/project[\s\S]*network[\s\S]*reject/i);
+      expect(markdown).toMatch(/credential injection[\s\S]*unavailable/i);
+    }
+  });
+
   it("ships the supported docs, release notes, and official logo asset", async () => {
     for (const path of [
       "docs/configuration.md",
@@ -70,7 +104,6 @@ describe("public documentation", () => {
       "docs/diagnostics.md",
       "docs/development.md",
       "docs/releases.md",
-      "SPEC.md",
       "CHANGELOG.md",
     ]) {
       await expect(access(projectUrl(path))).resolves.toBeUndefined();
@@ -82,6 +115,7 @@ describe("public documentation", () => {
 
     const changelog = await read("CHANGELOG.md");
     expect(changelog).toMatch(/^## \[Unreleased\]$/m);
+    expect(changelog).toMatch(/^## \[0\.2\.0\] - 2026-08-19$/m);
     expect(changelog).toMatch(/^## \[0\.1\.0\] - 2026-08-\d{2}$/m);
   });
 

@@ -54,7 +54,6 @@ describe("packed Sandlot release artifact", () => {
       "package/bin/mktemp",
       "package/README.md",
       "package/CHANGELOG.md",
-      "package/SPEC.md",
       "package/LICENSE",
       "package/scripts/pack-check.mjs",
       "package/docs/configuration.md",
@@ -64,6 +63,7 @@ describe("packed Sandlot release artifact", () => {
       "package/docs/releases.md",
       "package/docs/assets/sandlot-logo.png",
     ]));
+    expect(entries).not.toContain("package/SPEC.md");
   });
 
   it("keeps the packed quick start and detailed operating guides available", () => {

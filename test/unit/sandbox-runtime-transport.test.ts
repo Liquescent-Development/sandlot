@@ -141,13 +141,14 @@ describe("forked Sandbox Runtime transport", () => {
   it("settles an aborted request as an abort and removes its signal listener", async () => {
     const fixture = await createFixtureService(`
       process.on("message", (message) => {
-        if (message?.type === "request" && message.operation === "reset") {
+        if (message?.type === "request" && (message.operation === "initialize" || message.operation === "reset")) {
           process.send?.({ type: "response", id: message.id, ok: true, value: undefined });
         }
       });
     `);
     const boundary = createBoundary(fixture.path);
     await boundary.open(fixture.root);
+    await initializeBoundary(boundary);
     const temporaryDirectory = await fixture.temporaryDirectory();
     await expect(access(temporaryDirectory)).resolves.toBeUndefined();
     const controller = new AbortController();
@@ -185,7 +186,7 @@ describe("forked Sandbox Runtime transport", () => {
     const receivedMarker = join(receivedRoot, "received");
     const fixture = await createFixtureService(`
       process.on("message", (message) => {
-        writeFileSync(${JSON.stringify(receivedMarker)}, String(message?.operation));
+        if (message?.operation === "wrap") writeFileSync(${JSON.stringify(receivedMarker)}, "wrap");
         if (message?.type === "request") {
           process.send?.({ type: "response", id: message.id, ok: true, value: { argv: ["/bin/bash"], env: {} } });
         }
@@ -193,6 +194,7 @@ describe("forked Sandbox Runtime transport", () => {
     `);
     const boundary = createBoundary(fixture.path);
     await boundary.open(fixture.root);
+    await initializeBoundary(boundary);
 
     await expect(boundary.wrapWithSandboxArgv("x".repeat(2 * 1024 * 1024), undefined, undefined, undefined, fixture.root))
       .rejects.toThrow(/message.*large|request.*size/i);
@@ -219,6 +221,13 @@ function createBoundary(servicePath: string): SandboxRuntimeBoundary {
       killWaitMs: 100,
     },
   } as SandboxRuntimeBoundaryOptions);
+}
+
+async function initializeBoundary(boundary: SandboxRuntimeBoundary): Promise<void> {
+  await boundary.initialize({
+    network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+    filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+  });
 }
 
 async function createFixtureService(body: string): Promise<{

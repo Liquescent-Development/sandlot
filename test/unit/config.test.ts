@@ -71,6 +71,34 @@ describe("Sandlot configuration", () => {
     expect(() => parseProjectPolicy({ allowPty: false })).toThrow(/allowPty/);
   });
 
+  it("accepts the exact trusted-user unrestricted network mode", () => {
+    expect(parseUserPolicy({ network: { mode: "unrestricted" } }))
+      .toMatchObject({ network: { mode: "unrestricted" } });
+  });
+
+  it("accepts unrestricted masking when no credential injection is requested", () => {
+    const policy = parseUserPolicy({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    });
+
+    expect(policy).toMatchObject({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    });
+    expect(policy.network).not.toHaveProperty("tlsTerminate");
+  });
+
+  it("rejects filtered network rules in unrestricted mode", () => {
+    expect(() => parseUserPolicy({ network: { mode: "unrestricted", allowedDomains: ["api.example.com"] } }))
+      .toThrow(/allowedDomains|unrecognized/i);
+  });
+
+  it("rejects unrestricted network mode in project policy", () => {
+    expect(() => parseProjectPolicy({ network: { mode: "unrestricted" } }))
+      .toThrow(/mode|unrecognized/i);
+  });
+
   it("uses Sandbox Runtime validation for network and credential declarations", () => {
     expect(() => parseUserPolicy({ network: { allowedDomains: ["https://api.example.com"] } }))
       .toThrow(/Invalid domain pattern/);

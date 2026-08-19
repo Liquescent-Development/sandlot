@@ -8,6 +8,236 @@ import {
 } from "../../src/helpers/sandbox-runtime-service.js";
 
 describe("Sandbox Runtime service protocol", () => {
+  it("passes no ask callback for a trusted filtered initialization", async () => {
+    const manager = serviceManager();
+    const config = {
+      network: { allowedDomains: ["api.example.com"], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+      enableLogMonitor: true,
+    });
+
+    expect(manager.initialize).toHaveBeenCalledWith(config, undefined, true);
+  });
+
+  it("creates an allow-all ask callback only for validated unrestricted initialization", async () => {
+    const manager = serviceManager();
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "unrestricted",
+    });
+
+    const callback = manager.initialize.mock.calls[0]?.[1];
+    expect(callback).toEqual(expect.any(Function));
+    await expect(callback?.({ host: "unlisted.example", port: 443 })).resolves.toBe(true);
+  });
+
+  it.each([
+    ["an unknown mode", "ask-everything", { allowedDomains: [], deniedDomains: [], strictAllowlist: false }],
+    ["a non-string mode", false, { allowedDomains: [], deniedDomains: [], strictAllowlist: false }],
+    ["a filtered mode paired with an unrestricted config", "filtered", { allowedDomains: [], deniedDomains: [], strictAllowlist: false }],
+    ["an unrestricted mode paired with strict allowlisting", "unrestricted", { allowedDomains: [], deniedDomains: [], strictAllowlist: true }],
+    ["an unrestricted mode paired with allowed domains", "unrestricted", { allowedDomains: ["api.example.com"], deniedDomains: [], strictAllowlist: false }],
+    ["an unrestricted mode paired with denied domains", "unrestricted", { allowedDomains: [], deniedDomains: ["blocked.example"], strictAllowlist: false }],
+  ])("rejects %s before SRT initialization", async (_label, networkMode, network) => {
+    const manager = serviceManager();
+
+    await expect(handleSandboxRuntimeRequest(manager, "initialize", {
+      config: { network, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
+      networkMode,
+    })).rejects.toThrow(/network mode|strict allowlist|domain/i);
+
+    expect(manager.initialize).not.toHaveBeenCalled();
+  });
+
+  it("requires successful initialization before wrapping a validated unrestricted staging config", async () => {
+    const manager = serviceManager();
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "updateConfig", { config, networkMode: "unrestricted" });
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .rejects.toThrow(/initialized/i);
+
+    expect(manager.wrapWithSandboxArgv).not.toHaveBeenCalled();
+  });
+
+  it("rejects an update that changes the trusted mode after initialization", async () => {
+    const manager = serviceManager();
+    const filtered = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+    const unrestricted = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "updateConfig", { config: filtered, networkMode: "filtered" });
+    await handleSandboxRuntimeRequest(manager, "initialize", { config: filtered, networkMode: "filtered" });
+    await expect(handleSandboxRuntimeRequest(manager, "updateConfig", {
+      config: unrestricted,
+      networkMode: "unrestricted",
+    })).rejects.toThrow(/initializ|mode/i);
+
+    expect(manager.updateConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore initialized state when reset overtakes initialization", async () => {
+    const initialized = deferred();
+    const manager = serviceManager({
+      initialize: vi.fn(async () => { await initialized.promise; }),
+    });
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const initialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    });
+    await handleSandboxRuntimeRequest(manager, "reset");
+    initialized.resolve();
+
+    await expect(initialization).rejects.toThrow(/reset|cancel/i);
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .rejects.toThrow(/initialized/i);
+    expect(manager.wrapWithSandboxArgv).not.toHaveBeenCalled();
+  });
+
+  it("serializes reset and replacement initialization ahead of a stale unrestricted manager call", async () => {
+    const unrestrictedInitialized = deferred();
+    const filteredInitialized = deferred();
+    let managerNetworkMode: "filtered" | "unrestricted" | undefined;
+    const manager = serviceManager({
+      initialize: vi.fn(async (config: { network: { strictAllowlist: boolean } }) => {
+        if (config.network.strictAllowlist) {
+          await filteredInitialized.promise;
+          managerNetworkMode = "filtered";
+        } else {
+          await unrestrictedInitialized.promise;
+          managerNetworkMode = "unrestricted";
+        }
+      }),
+      reset: vi.fn(async () => { managerNetworkMode = undefined; }),
+    });
+    const unrestricted = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+    const filtered = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const staleInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config: unrestricted,
+      networkMode: "unrestricted",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(manager.initialize).toHaveBeenCalledOnce());
+    await handleSandboxRuntimeRequest(manager, "reset");
+    const replacementInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config: filtered,
+      networkMode: "filtered",
+    });
+    filteredInitialized.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const beforeStaleResolves = await handleSandboxRuntimeRequest(manager, "wrap", {
+      command: "true",
+      cwd: process.cwd(),
+    }).catch((error: unknown) => error);
+    unrestrictedInitialized.resolve();
+
+    await expect(staleInitialization).resolves.toBeInstanceOf(Error);
+    await expect(replacementInitialization).resolves.toBeUndefined();
+    expect(managerNetworkMode).toBe("filtered");
+    expect(beforeStaleResolves).toBeInstanceOf(Error);
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .resolves.toEqual({ argv: ["/bin/bash", "-c", "wrapped"] });
+  });
+
+  it("fails closed when the reset barrier behind an initializer fails", async () => {
+    const initialized = deferred();
+    const manager = serviceManager({
+      initialize: vi.fn(async () => { await initialized.promise; }),
+      reset: vi.fn(async () => { throw new Error("manager reset failure"); }),
+    });
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const staleInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(manager.initialize).toHaveBeenCalledOnce());
+    await handleSandboxRuntimeRequest(manager, "reset", undefined);
+    const replacementInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    }).catch((error: unknown) => error);
+    initialized.resolve();
+
+    await expect(staleInitialization).resolves.toBeInstanceOf(Error);
+    const replacementError = await replacementInitialization;
+    expect(replacementError).toBeInstanceOf(Error);
+    expect(String(replacementError)).toMatch(/reset failure/i);
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .rejects.toThrow(/initialized/i);
+    expect(manager.initialize).toHaveBeenCalledOnce();
+  });
+
+  it("recovers after a failed reset barrier and a later successful reset", async () => {
+    const firstInitialization = deferred();
+    let initializeCalls = 0;
+    const manager = serviceManager({
+      initialize: vi.fn(async () => {
+        initializeCalls++;
+        if (initializeCalls === 1) await firstInitialization.promise;
+      }),
+      reset: vi.fn()
+        .mockRejectedValueOnce(new Error("first reset failure"))
+        .mockResolvedValueOnce(undefined),
+    });
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const staleInitialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    });
+    await vi.waitFor(() => expect(manager.initialize).toHaveBeenCalledOnce());
+    await handleSandboxRuntimeRequest(manager, "reset", undefined);
+    firstInitialization.resolve();
+    await expect(staleInitialization).rejects.toThrow(/reset|cancel/i);
+    await vi.waitFor(() => expect(manager.reset).toHaveBeenCalledTimes(1));
+
+    await expect(handleSandboxRuntimeRequest(manager, "reset", undefined)).resolves.toBeUndefined();
+    await expect(handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    })).resolves.toBeUndefined();
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .resolves.toEqual({ argv: ["/bin/bash", "-c", "wrapped"] });
+    expect(manager.reset).toHaveBeenCalledTimes(2);
+    expect(manager.initialize).toHaveBeenCalledTimes(2);
+  });
+
   it("routes wrap ownership, cwd, cleanup, and command-scoped violations through SRT", async () => {
     const cwd = process.cwd();
     const violations = [{ line: "deny file-write /protected" }];
@@ -25,6 +255,8 @@ describe("Sandbox Runtime service protocol", () => {
       reset: vi.fn(async () => undefined),
     };
     const abort = new AbortController();
+
+    await initializeService(manager);
 
     const descriptor = await handleSandboxRuntimeRequest(manager, "wrap", {
       command: "inner command",
@@ -63,6 +295,8 @@ describe("Sandbox Runtime service protocol", () => {
       throw new Error("ripgrep scan failed with exit code 2");
     });
 
+    await initializeService(manager);
+
     await expect(handleSandboxRuntimeRequest(manager, "wrap", {
       command: "inner command",
       cwd: "/workspace",
@@ -99,6 +333,7 @@ describe("Sandbox Runtime service protocol", () => {
     };
 
     try {
+      await initializeService(manager);
       await Promise.all(invocationRoots.map((cwd, index) => handleSandboxRuntimeRequest(manager, "wrap", {
         command: `inner command ${index}`,
         cwd,
@@ -116,6 +351,8 @@ describe("Sandbox Runtime service protocol", () => {
     const manager = serviceManager();
     const inherited = Object.create({ command: "true", cwd: "/workspace" });
     const scanMandatoryDenyPaths = vi.fn(async () => undefined);
+
+    await initializeService(manager);
 
     await expect(handleSandboxRuntimeRequest(manager, "wrap", inherited)).rejects.toThrow(/own|plain|payload/i);
     await expect(handleSandboxRuntimeRequest(manager, "wrap", {
@@ -158,8 +395,10 @@ describe("Sandbox Runtime service protocol", () => {
     try {
       await handleSandboxRuntimeRequest(manager, "updateConfig", {
         config,
+        networkMode: "filtered",
         credentialEnvironment: { [name]: secret },
       });
+      await initializeService(manager, config, { [name]: secret });
       const descriptor = await handleSandboxRuntimeRequest(manager, "wrap", {
         command: "true",
         cwd: process.cwd(),
@@ -192,8 +431,10 @@ describe("Sandbox Runtime service protocol", () => {
       try {
         await handleSandboxRuntimeRequest(manager, "updateConfig", {
           config,
+          networkMode: "filtered",
           credentialEnvironment: { [name]: secret },
         });
+        await initializeService(manager, config, { [name]: secret });
         await expect(handleSandboxRuntimeRequest(manager, "wrap", {
           command: "true",
           cwd: process.cwd(),
@@ -231,8 +472,10 @@ describe("Sandbox Runtime service protocol", () => {
     };
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
       config,
+      networkMode: "filtered",
       credentialEnvironment: { TMPDIR: secret },
     });
+    await initializeService(manager, config, { TMPDIR: secret });
 
     await expect(handleSandboxRuntimeRequest(manager, "wrap", {
       command: "true",
@@ -249,10 +492,13 @@ describe("Sandbox Runtime service protocol", () => {
         env: { LEAK: secret },
       })),
     });
+    const config = credentialConfig(name);
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
-      config: credentialConfig(name),
+      config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
+    await initializeService(manager, config, { [name]: secret });
 
     const error = await handleSandboxRuntimeRequest(manager, "wrap", {
       command: "true",
@@ -270,8 +516,10 @@ describe("Sandbox Runtime service protocol", () => {
     const manager = serviceManager({
       checkDependenciesAsync: vi.fn(async () => ({ warnings: [secret], errors: [] })),
     });
+    const config = credentialConfig(name);
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
-      config: credentialConfig(name),
+      config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
 
@@ -299,6 +547,7 @@ describe("Sandbox Runtime service protocol", () => {
     };
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
       config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
 
@@ -335,6 +584,7 @@ describe("Sandbox Runtime service protocol", () => {
     };
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
       config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
 
@@ -380,6 +630,7 @@ describe("Sandbox Runtime service protocol", () => {
         return new Promise<never>(() => undefined);
       }),
     });
+    await initializeService(manager);
     const request = handleSandboxRuntimeRequest(manager, "wrap", {
       command: "true",
       cwd: process.cwd(),
@@ -422,7 +673,7 @@ describe("Sandbox Runtime service protocol", () => {
     const requests = Array.from({ length: 65 }, () => handleSandboxRuntimeRequest(
       manager,
       "initialize",
-      { config },
+      { config, networkMode: "filtered" },
       undefined,
       dependencies,
     ).catch((error: unknown) => error));
@@ -459,6 +710,12 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
 function credentialConfig(name: string) {
   return {
     network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
@@ -468,4 +725,19 @@ function credentialConfig(name: string) {
       envVars: [{ name, mode: "mask" as const }],
     },
   };
+}
+
+async function initializeService(
+  manager: ReturnType<typeof serviceManager>,
+  config = {
+    network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+    filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+  },
+  credentialEnvironment: NodeJS.ProcessEnv = {},
+): Promise<void> {
+  await handleSandboxRuntimeRequest(manager, "initialize", {
+    config,
+    networkMode: "filtered",
+    credentialEnvironment,
+  });
 }

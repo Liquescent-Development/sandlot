@@ -46,10 +46,15 @@ export { resolveExtensionTrustPaths } from "./trust.js";
 
 interface ExtensionSandboxManager extends SandboxManagerLike {
   open(cwd: string): Promise<void>;
-  updateConfig(config: SandboxRuntimeConfig): Promise<void>;
+  updateConfig(config: SandboxRuntimeConfig, networkMode?: EffectivePolicy["networkMode"]): Promise<void>;
   getLinuxGlobPatternWarnings(): Promise<string[]>;
   checkDependenciesAsync(ripgrepConfig?: { command: string; args?: string[] }): Promise<SandboxDependencyCheck>;
-  initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+  initialize(
+    config: SandboxRuntimeConfig,
+    askCallback?: undefined,
+    enableLogMonitor?: boolean,
+    networkMode?: EffectivePolicy["networkMode"],
+  ): Promise<void>;
   reset(): Promise<void>;
   getSandboxViolationStore(): SandboxManagerLike["getSandboxViolationStore"] extends (...args: never[]) => infer T
     ? T & { clear(): void; getViolations(limit?: number): Array<{ line: string }>; getTotalCount(): number }
@@ -181,7 +186,7 @@ export function createSandlotExtension(dependencies: ExtensionDependencies) {
         await dependencies.manager.open(ctx.cwd);
         // Sandbox Runtime 0.0.73 reads non-rg dependency paths from its
         // process-global config even in the explicit preflight API.
-        await dependencies.manager.updateConfig(config);
+        await dependencies.manager.updateConfig(config, policy.networkMode);
         if (dependencies.platform === "linux") {
           const globWarnings = await dependencies.manager.getLinuxGlobPatternWarnings();
           if (globWarnings.length > 0) {
@@ -203,7 +208,7 @@ export function createSandlotExtension(dependencies: ExtensionDependencies) {
           );
         }
 
-        await dependencies.manager.initialize(config, undefined, true);
+        await dependencies.manager.initialize(config, undefined, true, policy.networkMode);
         assertProtectedOwnership(pi.getAllTools(), dependencies.sandlotSourcePath);
         dependencies.runtime.markReady(policy);
         setStatus(ctx, "🔒 Sandlot");

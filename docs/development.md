@@ -30,7 +30,7 @@ The complete macOS release gate is the single command `npm run release:verify`:
 npm run release:verify
 ```
 
-`npm test` runs unit and contract coverage. Required integration proves the supported macOS Seatbelt boundary and refuses to skip it. The release scripts clean-build before smoke tests. Smoke tests pack that final artifact, inspect `dist/index.js`, both compiled workers, README, SPEC, and LICENSE, install only the tarball plus exact lock-resolved dependencies under isolated Pi/npm state, and exercise real print, JSON, RPC, and interactive PTY modes. They also clone a pinned local Git release ref through real Pi without network access.
+`npm test` runs unit and contract coverage. Required integration proves the supported macOS Seatbelt boundary and refuses to skip it. The release scripts clean-build before smoke tests. Smoke tests pack that final artifact, inspect `dist/index.js`, both compiled workers, README, the operator documentation, and LICENSE, install only the tarball plus exact lock-resolved dependencies under isolated Pi/npm state, and exercise real print, JSON, RPC, and interactive PTY modes. They also clone a pinned local Git release ref through real Pi without network access.
 
 `pack:check` inspects the already-verified artifact and prints its dry-run contents; run `npm run build` first when invoking it alone. `release:verify` is the macOS first-release gate; `prepublishOnly` deliberately does not invoke `npm pack` or `npm publish`, avoiding recursive packaging.
 

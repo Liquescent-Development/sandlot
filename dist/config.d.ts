@@ -1,4 +1,68 @@
 import { z } from "zod";
+export type NetworkMode = "filtered" | "unrestricted";
+declare const FilteredUserNetworkSchema: z.ZodObject<{
+    mode: z.ZodOptional<z.ZodLiteral<"filtered">>;
+    allowedDomains: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    deniedDomains: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    deniedDomainReasons: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    allowUnixSockets: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    allowAllUnixSockets: z.ZodOptional<z.ZodBoolean>;
+    allowLocalBinding: z.ZodOptional<z.ZodBoolean>;
+    allowMachLookup: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    tlsTerminate: z.ZodOptional<z.ZodObject<{
+        caCertPath: z.ZodOptional<z.ZodString>;
+        caKeyPath: z.ZodOptional<z.ZodString>;
+        excludeDomains: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+        extraCaCertPaths: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    }, "strict", z.ZodTypeAny, {
+        caCertPath?: string | undefined;
+        caKeyPath?: string | undefined;
+        excludeDomains?: string[] | undefined;
+        extraCaCertPaths?: string[] | undefined;
+    }, {
+        caCertPath?: string | undefined;
+        caKeyPath?: string | undefined;
+        excludeDomains?: string[] | undefined;
+        extraCaCertPaths?: string[] | undefined;
+    }>>;
+}, "strict", z.ZodTypeAny, {
+    mode?: "filtered" | undefined;
+    allowedDomains?: string[] | undefined;
+    deniedDomains?: string[] | undefined;
+    deniedDomainReasons?: Record<string, string> | undefined;
+    allowUnixSockets?: string[] | undefined;
+    allowAllUnixSockets?: boolean | undefined;
+    allowLocalBinding?: boolean | undefined;
+    allowMachLookup?: string[] | undefined;
+    tlsTerminate?: {
+        caCertPath?: string | undefined;
+        caKeyPath?: string | undefined;
+        excludeDomains?: string[] | undefined;
+        extraCaCertPaths?: string[] | undefined;
+    } | undefined;
+}, {
+    mode?: "filtered" | undefined;
+    allowedDomains?: string[] | undefined;
+    deniedDomains?: string[] | undefined;
+    deniedDomainReasons?: Record<string, string> | undefined;
+    allowUnixSockets?: string[] | undefined;
+    allowAllUnixSockets?: boolean | undefined;
+    allowLocalBinding?: boolean | undefined;
+    allowMachLookup?: string[] | undefined;
+    tlsTerminate?: {
+        caCertPath?: string | undefined;
+        caKeyPath?: string | undefined;
+        excludeDomains?: string[] | undefined;
+        extraCaCertPaths?: string[] | undefined;
+    } | undefined;
+}>;
+declare const UnrestrictedUserNetworkSchema: z.ZodObject<{
+    mode: z.ZodLiteral<"unrestricted">;
+}, "strict", z.ZodTypeAny, {
+    mode: "unrestricted";
+}, {
+    mode: "unrestricted";
+}>;
 declare const EnvironmentPolicySchema: z.ZodObject<{
     passThrough: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     deny: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -14,7 +78,8 @@ declare const EnvironmentPolicySchema: z.ZodObject<{
 }>;
 declare const UserPolicySchema: z.ZodObject<{
     enabled: z.ZodOptional<z.ZodBoolean>;
-    network: z.ZodOptional<z.ZodObject<{
+    network: z.ZodOptional<z.ZodUnion<[z.ZodObject<{
+        mode: z.ZodOptional<z.ZodLiteral<"filtered">>;
         allowedDomains: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         deniedDomains: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         deniedDomainReasons: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
@@ -39,6 +104,7 @@ declare const UserPolicySchema: z.ZodObject<{
             extraCaCertPaths?: string[] | undefined;
         }>>;
     }, "strict", z.ZodTypeAny, {
+        mode?: "filtered" | undefined;
         allowedDomains?: string[] | undefined;
         deniedDomains?: string[] | undefined;
         deniedDomainReasons?: Record<string, string> | undefined;
@@ -53,6 +119,7 @@ declare const UserPolicySchema: z.ZodObject<{
             extraCaCertPaths?: string[] | undefined;
         } | undefined;
     }, {
+        mode?: "filtered" | undefined;
         allowedDomains?: string[] | undefined;
         deniedDomains?: string[] | undefined;
         deniedDomainReasons?: Record<string, string> | undefined;
@@ -66,7 +133,13 @@ declare const UserPolicySchema: z.ZodObject<{
             excludeDomains?: string[] | undefined;
             extraCaCertPaths?: string[] | undefined;
         } | undefined;
-    }>>;
+    }>, z.ZodObject<{
+        mode: z.ZodLiteral<"unrestricted">;
+    }, "strict", z.ZodTypeAny, {
+        mode: "unrestricted";
+    }, {
+        mode: "unrestricted";
+    }>]>>;
     filesystem: z.ZodOptional<z.ZodObject<{
         disabled: z.ZodOptional<z.ZodBoolean>;
         denyRead: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
@@ -272,6 +345,7 @@ declare const UserPolicySchema: z.ZodObject<{
 }, "strict", z.ZodTypeAny, {
     enabled?: boolean | undefined;
     network?: {
+        mode?: "filtered" | undefined;
         allowedDomains?: string[] | undefined;
         deniedDomains?: string[] | undefined;
         deniedDomainReasons?: Record<string, string> | undefined;
@@ -285,6 +359,8 @@ declare const UserPolicySchema: z.ZodObject<{
             excludeDomains?: string[] | undefined;
             extraCaCertPaths?: string[] | undefined;
         } | undefined;
+    } | {
+        mode: "unrestricted";
     } | undefined;
     filesystem?: {
         disabled?: boolean | undefined;
@@ -347,6 +423,7 @@ declare const UserPolicySchema: z.ZodObject<{
 }, {
     enabled?: boolean | undefined;
     network?: {
+        mode?: "filtered" | undefined;
         allowedDomains?: string[] | undefined;
         deniedDomains?: string[] | undefined;
         deniedDomainReasons?: Record<string, string> | undefined;
@@ -360,6 +437,8 @@ declare const UserPolicySchema: z.ZodObject<{
             excludeDomains?: string[] | undefined;
             extraCaCertPaths?: string[] | undefined;
         } | undefined;
+    } | {
+        mode: "unrestricted";
     } | undefined;
     filesystem?: {
         disabled?: boolean | undefined;
@@ -514,10 +593,25 @@ declare const ProjectPolicySchema: z.ZodObject<{
 }>;
 export type EnvironmentPolicy = z.infer<typeof EnvironmentPolicySchema>;
 type ParsedUserPolicy = z.infer<typeof UserPolicySchema>;
+type FilteredUserNetwork = z.infer<typeof FilteredUserNetworkSchema> & {
+    strictAllowlist?: true;
+};
+type UnrestrictedUserNetwork = z.infer<typeof UnrestrictedUserNetworkSchema>;
 export type UserPolicy = Omit<ParsedUserPolicy, "network"> & {
-    network?: NonNullable<ParsedUserPolicy["network"]> & {
-        strictAllowlist?: true;
-    };
+    network?: FilteredUserNetwork | UnrestrictedUserNetwork;
+};
+type SecureNetworkDefaults = {
+    mode: "filtered";
+    allowedDomains: string[];
+    deniedDomains: string[];
+    strictAllowlist: true;
+    allowUnixSockets: string[];
+    allowAllUnixSockets: false;
+    allowLocalBinding: false;
+    allowMachLookup: string[];
+};
+type SecureUserDefaults = Omit<UserPolicy, "network"> & {
+    network: SecureNetworkDefaults;
 };
 export type ProjectPolicy = z.infer<typeof ProjectPolicySchema>;
 export declare class SandlotConfigError extends Error {
@@ -528,7 +622,7 @@ export declare class SandlotConfigError extends Error {
 }
 export declare function parseUserPolicy(value: unknown, source?: string): UserPolicy;
 export declare function parseProjectPolicy(value: unknown, source?: string): ProjectPolicy;
-export declare function secureUserDefaults(cwd: string, agentDir: string): UserPolicy;
+export declare function secureUserDefaults(cwd: string, agentDir: string): SecureUserDefaults;
 export interface LoadPolicyFilesOptions {
     cwd: string;
     agentDir?: string;

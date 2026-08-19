@@ -24,6 +24,24 @@ describeIntegration("real Sandbox Runtime network enforcement", () => {
     expect(result).toMatchObject({ exitCode: 0, stdout: "allowed" });
   });
 
+  it.runIf(process.platform === "darwin")("keeps filesystem enforcement while unrestricted mode reaches the same unlisted HTTP fixture", async () => {
+    await harness!.dispose();
+    harness = await createSecurityHarness({ useProductionBoundary: true });
+
+    const filtered = await harness!.run(curl(harness!.allowedUrl));
+    const unrestricted = await harness!.run(curl(harness!.allowedUrl), {
+      network: { mode: "unrestricted" },
+    });
+    const deniedRead = await harness!.run(`cat ${quote(harness!.paths.homeCredential)}`, {
+      network: { mode: "unrestricted" },
+    });
+
+    expect(filtered.exitCode).not.toBe(0);
+    expect(unrestricted).toMatchObject({ exitCode: 0, stdout: "allowed" });
+    expect(deniedRead.exitCode).not.toBe(0);
+    expect(deniedRead.stdout).not.toContain("fake-home-private-key");
+  });
+
   it("attributes a real proxy denial to its command ID and not a harmless command", async () => {
     const denied = await harness!.runWithId(curl(harness!.allowedUrl), "network-denied");
     const harmless = await harness!.runWithId("printf harmless", "network-harmless");

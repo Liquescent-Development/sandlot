@@ -1,10 +1,11 @@
 import { type FilesystemConfig, type NetworkConfig, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { type EnvironmentPolicy, type ProjectPolicy, type UserPolicy } from "./config.js";
+import { type EnvironmentPolicy, type NetworkMode, type ProjectPolicy, type UserPolicy } from "./config.js";
 type EffectiveNetworkConfig = Omit<NetworkConfig, "strictAllowlist"> & {
-    strictAllowlist: true;
+    strictAllowlist: boolean;
 };
 export interface EffectivePolicy {
     enabled: boolean;
+    networkMode: NetworkMode;
     network: EffectiveNetworkConfig;
     filesystem: FilesystemConfig;
     credentials: NonNullable<UserPolicy["credentials"]> | undefined;

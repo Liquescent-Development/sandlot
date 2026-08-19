@@ -80,7 +80,7 @@ export function createSandlotExtension(dependencies) {
                 await dependencies.manager.open(ctx.cwd);
                 // Sandbox Runtime 0.0.73 reads non-rg dependency paths from its
                 // process-global config even in the explicit preflight API.
-                await dependencies.manager.updateConfig(config);
+                await dependencies.manager.updateConfig(config, policy.networkMode);
                 if (dependencies.platform === "linux") {
                     const globWarnings = await dependencies.manager.getLinuxGlobPatternWarnings();
                     if (globWarnings.length > 0) {
@@ -97,7 +97,7 @@ export function createSandlotExtension(dependencies) {
                     && dependencyCheck.warnings.some((warning) => /seccomp|unix socket/i.test(warning))) {
                     throw new Error(`Sandbox Runtime cannot enforce Unix-socket denial: ${dependencyCheck.warnings.join("; ")}`);
                 }
-                await dependencies.manager.initialize(config, undefined, true);
+                await dependencies.manager.initialize(config, undefined, true, policy.networkMode);
                 assertProtectedOwnership(pi.getAllTools(), dependencies.sandlotSourcePath);
                 dependencies.runtime.markReady(policy);
                 setStatus(ctx, "🔒 Sandlot");

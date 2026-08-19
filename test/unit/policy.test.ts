@@ -348,6 +348,81 @@ describe("policy composition", () => {
     expect(effective.trustedCustomTools).toEqual([]);
   });
 
+  it("preserves filtered network defaults", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandlot-policy-"));
+    const effective = await composePolicy({}, undefined, { cwd: root, agentDir: join(root, "agent") });
+
+    expect(effective.networkMode).toBe("filtered");
+    expect(toSandboxRuntimeConfig(effective).network).toMatchObject({
+      allowedDomains: [],
+      deniedDomains: [],
+      strictAllowlist: true,
+      allowUnixSockets: [],
+      allowAllUnixSockets: false,
+      allowLocalBinding: false,
+    });
+  });
+
+  it("composes unrestricted user network mode without domain filtering", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandlot-policy-"));
+    const effective = await composePolicy({ network: { mode: "unrestricted" } }, undefined, {
+      cwd: root,
+      agentDir: join(root, "agent"),
+    });
+
+    expect(effective.networkMode).toBe("unrestricted");
+    expect(effective.network.allowedDomains).toEqual([]);
+    expect(effective.network.deniedDomains).toEqual([]);
+    const runtime = toSandboxRuntimeConfig(effective);
+    expect(runtime.network).toMatchObject({
+      allowedDomains: [],
+      deniedDomains: [],
+      strictAllowlist: false,
+      allowUnixSockets: [],
+      allowAllUnixSockets: false,
+      allowLocalBinding: false,
+    });
+    expect(runtime.network).not.toHaveProperty("tlsTerminate");
+  });
+
+  it("rejects every project network block in unrestricted user mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandlot-policy-"));
+
+    await expect(composePolicy({ network: { mode: "unrestricted" } }, { network: {} }, {
+      cwd: root,
+      agentDir: join(root, "agent"),
+    })).rejects.toThrow(/project policy.*network.*unrestricted|network.*unrestricted.*project policy/i);
+  });
+
+  it("allows deny-only credentials but rejects injected credentials in unrestricted user mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sandlot-policy-"));
+    const context = { cwd: root, agentDir: join(root, "agent") };
+
+    await expect(composePolicy({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "deny" }] },
+    }, undefined, context)).resolves.toBeDefined();
+    const masked = await composePolicy({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    }, undefined, context);
+    expect(masked.credentials?.envVars).toEqual([{ name: "TOKEN", mode: "mask" }]);
+    expect(masked.network.tlsTerminate).toBeUndefined();
+    expect(toSandboxRuntimeConfig(masked)).toMatchObject({
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+        strictAllowlist: false,
+        tlsTerminate: {},
+      },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    });
+    await expect(composePolicy({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "deny", injectHosts: ["api.example.com"] }] },
+    }, undefined, context)).rejects.toThrow(/credentials\.envVars\[0\]\.injectHosts.*unrestricted/i);
+  });
+
   it("removes forged Runtime network authority during conversion", async () => {
     const { root, user, project } = await fixture();
     const effective = await composePolicy(user, project, { cwd: root, agentDir: join(root, "agent") });
