@@ -1,5 +1,5 @@
-import { constants } from "node:fs";
-import { lstat, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { fstatSync, fsyncSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -87,15 +87,15 @@ async function main(args = process.argv.slice(2)) {
       lockfile,
       changelog,
     });
-    const root = await outputRoot();
-    const notesPath = await safeOutputPath(root, options.notesOut);
-    const metadataPath = await safeOutputPath(root, options.metadataOut);
-    if (notesPath === metadataPath) throw new Error("release output paths must differ");
-
-    await writeOutputs([
-      [notesPath, metadata.notes],
-      [metadataPath, `${JSON.stringify({ version: metadata.version, tag: metadata.tag, notesFile: basename(notesPath) }, null, 2)}\n`],
-    ]);
+    validateOutputDescriptor(options.notesFd);
+    validateOutputDescriptor(options.metadataFd);
+    if (options.notesFd === options.metadataFd) throw new Error("release output descriptors must differ");
+    writeOutputs(
+      options.notesFd,
+      options.metadataFd,
+      metadata.notes,
+      `${JSON.stringify({ version: metadata.version, tag: metadata.tag, notesFile: options.notesFile }, null, 2)}\n`,
+    );
   } catch {
     process.stderr.write("release metadata validation failed\n");
     process.exitCode = 1;
@@ -103,31 +103,34 @@ async function main(args = process.argv.slice(2)) {
 }
 
 function parseArguments(args) {
-  if (args.length !== 6) throw new Error("expected version and two output paths");
+  if (args.length !== 8) throw new Error("expected version, two output descriptors, and a notes filename");
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
     const [name, value] = [args[index], args[index + 1]];
-    if ((name !== "--version" && name !== "--notes-out" && name !== "--metadata-out") || typeof value !== "string" || Object.hasOwn(options, name)) {
-      throw new Error("expected version and two output paths");
+    if ((name !== "--version" && name !== "--notes-fd" && name !== "--metadata-fd" && name !== "--notes-file") || typeof value !== "string" || Object.hasOwn(options, name)) {
+      throw new Error("expected version, two output descriptors, and a notes filename");
     }
     options[name] = value;
   }
-  if (!Object.hasOwn(options, "--version") || !Object.hasOwn(options, "--notes-out") || !Object.hasOwn(options, "--metadata-out")) {
-    throw new Error("expected version and two output paths");
+  if (!Object.hasOwn(options, "--version") || !Object.hasOwn(options, "--notes-fd") || !Object.hasOwn(options, "--metadata-fd") || !Object.hasOwn(options, "--notes-file")) {
+    throw new Error("expected version, two output descriptors, and a notes filename");
   }
-  return { version: options["--version"], notesOut: options["--notes-out"], metadataOut: options["--metadata-out"] };
+  return {
+    version: options["--version"],
+    notesFd: parseDescriptor(options["--notes-fd"]),
+    metadataFd: parseDescriptor(options["--metadata-fd"]),
+    notesFile: parseNotesFile(options["--notes-file"]),
+  };
 }
 
-async function outputRoot() {
-  const configuredRoot = process.env.RUNNER_TEMP;
-  const root = configuredRoot === undefined ? process.cwd() : configuredRoot;
-  const resolvedRoot = resolve(root);
-  const info = await lstat(resolvedRoot);
-  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("release output root is invalid");
-  return realpath(resolvedRoot);
+function parseDescriptor(value) {
+  if (!/^[1-9]\d*$/.test(value)) throw new Error("release output descriptor is invalid");
+  const descriptor = Number(value);
+  if (!Number.isSafeInteger(descriptor)) throw new Error("release output descriptor is invalid");
+  return descriptor;
 }
 
-async function safeOutputPath(root, requestedPath) {
+function parseNotesFile(requestedPath) {
   if (
     typeof requestedPath !== "string"
     || requestedPath.length === 0
@@ -136,38 +139,20 @@ async function safeOutputPath(root, requestedPath) {
     || requestedPath === "."
     || requestedPath === ".."
   ) {
-    throw new Error("release output path is invalid");
+    throw new Error("release notes filename is invalid");
   }
-  const target = resolve(root, requestedPath);
-  try {
-    const info = await lstat(target);
-    if (info.isSymbolicLink() || !info.isFile()) throw new Error("release output path is not a regular file");
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-  return target;
+  return requestedPath;
 }
 
-async function writeOutputs(outputs) {
-  const temporaryPaths = [];
-  try {
-    for (const [target, contents] of outputs) {
-      const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
-      temporaryPaths.push(temporary);
-      const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-      try {
-        await handle.writeFile(contents, "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-    }
-    for (let index = 0; index < outputs.length; index += 1) {
-      await rename(temporaryPaths[index], outputs[index][0]);
-    }
-  } finally {
-    await Promise.all(temporaryPaths.map((temporary) => rm(temporary, { force: true }).catch(() => {})));
-  }
+function validateOutputDescriptor(descriptor) {
+  if (!fstatSync(descriptor).isFile()) throw new Error("release output descriptor is not a regular file");
+}
+
+function writeOutputs(notesFd, metadataFd, notes, metadata) {
+  writeFileSync(notesFd, notes, "utf8");
+  fsyncSync(notesFd);
+  writeFileSync(metadataFd, metadata, "utf8");
+  fsyncSync(metadataFd);
 }
 
 async function readJson(path) {

@@ -1,5 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { lstat, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, open, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -124,12 +125,14 @@ describe("release metadata", () => {
     const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
     try {
       await writeFixture(root);
-      const failed = runCli(root, ["--version", "0.2.0", "--notes-out", "release-notes.md", "--metadata-out", "metadata.json"]);
+      const failed = await runCli(root, "0.2.0");
       expect(failed.status).toBe(1);
-      await expect(readFile(join(root, "release-notes.md"), "utf8")).rejects.toThrow();
-      await expect(readFile(join(root, "metadata.json"), "utf8")).rejects.toThrow();
+      expect(await readFile(join(root, "release-notes.md"), "utf8")).toBe("");
+      expect(await readFile(join(root, "metadata.json"), "utf8")).toBe("");
+      await rm(join(root, "release-notes.md"));
+      await rm(join(root, "metadata.json"));
 
-      const succeeded = runCli(root, ["--version", "0.1.0", "--notes-out", "release-notes.md", "--metadata-out", "metadata.json"]);
+      const succeeded = await runCli(root, "0.1.0");
       expect(succeeded.status).toBe(0);
       expect(await readFile(join(root, "release-notes.md"), "utf8"))
         .toBe("### Added\n\n- First stable Sandlot release.\n");
@@ -143,33 +146,30 @@ describe("release metadata", () => {
     }
   });
 
-  it("rejects a symlink or non-regular CLI output without following it", async () => {
-    // Following a symlink or overwriting a directory would let release output escape its trusted directory.
+  it("rejects a non-regular caller-supplied output descriptor", async () => {
+    // Writing to an unchecked descriptor would let a caller direct release metadata to a pipe or directory.
     const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
     try {
       await writeFixture(root);
-      await writeFile(join(root, "outside.md"), "unchanged\n");
-      await symlink(join(root, "outside.md"), join(root, "release-notes.md"));
-      await mkdir(join(root, "metadata.json"));
-      const result = runCli(root, ["--version", "0.1.0", "--notes-out", "release-notes.md", "--metadata-out", "metadata.json"]);
+      const [directory, metadata] = await Promise.all([
+        open(root, "r"),
+        open(join(root, "metadata.json"), "wx", 0o600),
+      ]);
+      const result = await runCliWithDescriptors(root, "0.1.0", directory.fd, metadata.fd);
       expect(result.status).toBe(1);
-      expect(await readFile(join(root, "outside.md"), "utf8")).toBe("unchanged\n");
-
-      await rm(join(root, "release-notes.md"));
-      const nonRegular = runCli(root, ["--version", "0.1.0", "--notes-out", "release-notes.md", "--metadata-out", "metadata.json"]);
-      expect(nonRegular.status).toBe(1);
-      await expect(readFile(join(root, "release-notes.md"), "utf8")).rejects.toThrow();
+      expect(await readFile(join(root, "metadata.json"), "utf8")).toBe("");
+      await Promise.all([directory.close(), metadata.close()]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("does not disclose a filesystem path when rejecting an unsafe CLI parent", async () => {
-    // Forwarding filesystem errors would expose a runner path through release-validation diagnostics.
+  it("does not disclose a filesystem path when rejecting invalid output descriptor arguments", async () => {
+    // Forwarding descriptor errors would expose a runner path through release-validation diagnostics.
     const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
     try {
       await writeFixture(root);
-      const result = runCli(root, ["--version", "0.1.0", "--notes-out", "missing/release-notes.md", "--metadata-out", "metadata.json"]);
+      const result = runRawCli(root, ["--version", "0.1.0", "--notes-fd", "not-a-fd", "--metadata-fd", "4", "--notes-file", "release-notes.md"]);
       expect(result.status).toBe(1);
       expect(result.stderr).not.toContain(root);
     } finally {
@@ -177,24 +177,20 @@ describe("release metadata", () => {
     }
   });
 
-  it("rejects nested output paths before a parent replacement can escape the runner root", async () => {
-    // Reintroducing check-then-use traversal of a nested parent would write release notes outside RUNNER_TEMP.
+  it("keeps real CLI output on pre-opened descriptors when the runner root is replaced", async () => {
+    // Reintroducing pathname output writes would redirect release artifacts through the replacement runner-root symlink.
     const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
     const outside = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-outside-"));
     try {
       await writeFixture(root);
-      const nested = join(root, "nested");
-      await mkdir(nested);
-      await demonstrateOldParentReplacementEscape(nested, outside);
-      expect(await readFile(join(outside, "escaped-notes.md"), "utf8")).toBe("old unsafe output\n");
-      await rm(join(outside, "escaped-notes.md"));
-      await rm(nested);
-      await mkdir(nested);
-
-      const result = runCli(root, ["--version", "0.1.0", "--notes-out", "nested/release-notes.md", "--metadata-out", "metadata.json"]);
-      expect(result.status).toBe(1);
-      await expect(readFile(join(outside, "release-notes.md"), "utf8")).rejects.toThrow();
-      await expect(readFile(join(root, "metadata.json"), "utf8")).rejects.toThrow();
+      const heldRoot = `${root}-held`;
+      const result = await runCliDuringRootReplacement(root, heldRoot, outside);
+      expect(result).toBe(0);
+      expect(await readdir(outside)).toEqual([]);
+      expect(await readFile(join(heldRoot, "release-notes.md"), "utf8"))
+        .toBe("### Added\n\n- First stable Sandlot release.\n");
+      await rm(root);
+      await rename(heldRoot, root);
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
@@ -211,20 +207,51 @@ async function writeFixture(root: string): Promise<void> {
   await writeFile(join(root, "CHANGELOG.md"), stableChangelog);
 }
 
-function runCli(cwd: string, args: string[]) {
+async function runCli(cwd: string, version: string) {
+  const [notes, metadata] = await Promise.all([
+    open(join(cwd, "release-notes.md"), "wx", 0o600),
+    open(join(cwd, "metadata.json"), "wx", 0o600),
+  ]);
+  try {
+    return await runCliWithDescriptors(cwd, version, notes.fd, metadata.fd);
+  } finally {
+    await Promise.all([notes.close(), metadata.close()]);
+  }
+}
+
+async function runCliWithDescriptors(cwd: string, version: string, notesFd: number, metadataFd: number) {
+  return runRawCli(cwd, ["--version", version, "--notes-fd", "3", "--metadata-fd", "4", "--notes-file", "release-notes.md"], [notesFd, metadataFd]);
+}
+
+function runRawCli(cwd: string, args: string[], descriptors: number[] = []) {
   return spawnSync(process.execPath, [fileURLToPath(new URL("../../scripts/release-metadata.mjs", import.meta.url)), ...args], {
     cwd,
     encoding: "utf8",
     env: { PATH: process.env.PATH, RUNNER_TEMP: cwd },
+    stdio: ["ignore", "pipe", "pipe", ...descriptors],
   });
 }
 
-async function demonstrateOldParentReplacementEscape(parent: string, outside: string): Promise<void> {
-  const target = join(parent, "escaped-notes.md");
-  const temporary = `${target}.tmp`;
-  await lstat(parent);
-  await rm(parent, { recursive: true });
-  await symlink(outside, parent, "dir");
-  await writeFile(temporary, "old unsafe output\n");
-  await rename(temporary, target);
+async function runCliDuringRootReplacement(root: string, heldRoot: string, outside: string): Promise<number | null> {
+  const [notes, metadata] = await Promise.all([
+    open(join(root, "release-notes.md"), "wx", 0o600),
+    open(join(root, "metadata.json"), "wx", 0o600),
+  ]);
+  try {
+    const child = spawn(process.execPath, [
+      fileURLToPath(new URL("../../scripts/release-metadata.mjs", import.meta.url)),
+      "--version", "0.1.0", "--notes-fd", "3", "--metadata-fd", "4", "--notes-file", "release-notes.md",
+    ], {
+      cwd: root,
+      env: { PATH: process.env.PATH, RUNNER_TEMP: root },
+      stdio: ["ignore", "pipe", "pipe", notes.fd, metadata.fd],
+    });
+    await once(child, "spawn");
+    await rename(root, heldRoot);
+    await symlink(outside, root, "dir");
+    const [status] = await once(child, "close");
+    return status;
+  } finally {
+    await Promise.all([notes.close(), metadata.close()]);
+  }
 }
