@@ -118,28 +118,52 @@ describe("search worker process", { timeout: WORKER_TEST_TIMEOUT_MS }, () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ version: 1, ok: false, error: { code: "RG_FAILED" } });
   });
 
-  it("terminates a timed-out worker's descendant process before it can keep mutating", async () => {
+  it("arms a short timeout only after descendant readiness and reaps the descendant", async () => {
     const marker = join(directory, "timed-out-descendant.txt");
+    const pidFile = join(directory, "timed-out-descendant.pid");
     const hangingEntry = join(directory, "hanging-worker.mjs");
-    await writeFile(hangingEntry, `import { spawn } from "node:child_process";
-const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
+    await writeFile(hangingEntry, `import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+setTimeout(() => {
+  const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
   const { appendFileSync, writeFileSync } = require("node:fs");
   const marker = process.argv[1];
+  const pidFile = process.argv[2];
+  writeFileSync(pidFile, String(process.pid));
   writeFileSync(marker, "started\\n");
   const heartbeat = setInterval(() => appendFileSync(marker, "beat\\n"), 50);
-  setTimeout(() => { clearInterval(heartbeat); process.exit(0); }, 3000);
-`)}, process.env.SANDLOT_FAKE_MARKER], { stdio: "ignore" });
-descendant.unref();
+  setTimeout(() => { clearInterval(heartbeat); process.exit(0); }, 5000);
+`)}, process.env.SANDLOT_FAKE_MARKER, process.env.SANDLOT_FAKE_PID_FILE], { stdio: "ignore" });
+  descendant.unref();
+  const readiness = setInterval(() => {
+    if (!existsSync(process.env.SANDLOT_FAKE_MARKER) || !existsSync(process.env.SANDLOT_FAKE_PID_FILE)) return;
+    clearInterval(readiness);
+    process.stdout.write("descendant-ready\\n");
+  }, 10);
+}, 300);
 setInterval(() => undefined, 1000);
 `);
 
-    await expect(runEntry(hangingEntry, "", { SANDLOT_FAKE_MARKER: marker }, 1_000))
-      .rejects.toThrow("search worker process timed out after 1000ms");
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-    const afterTimeout = await readFile(marker, "utf8");
-    expect(afterTimeout).toMatch(/^started\n(?:beat\n)+$/);
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-    await expect(readFile(marker, "utf8")).resolves.toBe(afterTimeout);
+    await expect(runEntry(hangingEntry, "", {
+      SANDLOT_FAKE_MARKER: marker,
+      SANDLOT_FAKE_PID_FILE: pidFile,
+    }, { timeoutMs: 100, readyToken: "descendant-ready\n", readinessTimeoutMs: 2_000 }))
+      .rejects.toThrow("search worker process timed out after 100ms");
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+    expect(descendantPid).toBeGreaterThan(0);
+    await expect(readFile(marker, "utf8")).resolves.toMatch(/^started\n(?:beat\n)*$/);
+    await expectProcessAbsent(descendantPid, 2_000);
+  });
+
+  it("bounds readiness failure and closes the unready worker group", async () => {
+    const unreadyEntry = join(directory, "unready-worker.mjs");
+    await writeFile(unreadyEntry, "setInterval(() => undefined, 1000);\n");
+
+    await expect(runEntry(unreadyEntry, "", {}, {
+      timeoutMs: 100,
+      readyToken: "never-ready\n",
+      readinessTimeoutMs: 250,
+    })).rejects.toThrow("search worker did not become ready after 250ms");
   });
 
   it("rejects file/search worker requests at the wrong fixed worker entry point", async () => {
@@ -163,8 +187,17 @@ function runRaw(stdin: string, environment: NodeJS.ProcessEnv = {}): Promise<{ e
   return runEntry(workerPath, stdin, environment);
 }
 
-function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv = {}, timeoutMs = WORKER_PROCESS_TIMEOUT_MS): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+interface EntryTimeoutOptions {
+  readonly timeoutMs: number;
+  readonly readyToken: string;
+  readonly readinessTimeoutMs: number;
+}
+
+function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv = {}, timeoutOptions: number | EntryTimeoutOptions = WORKER_PROCESS_TIMEOUT_MS): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   return new Promise((resolveResult, reject) => {
+    const timeoutMs = typeof timeoutOptions === "number" ? timeoutOptions : timeoutOptions.timeoutMs;
+    const readyToken = typeof timeoutOptions === "number" ? undefined : Buffer.from(timeoutOptions.readyToken);
+    const readinessTimeoutMs = typeof timeoutOptions === "number" ? undefined : timeoutOptions.readinessTimeoutMs;
     const child = spawn(process.execPath, [entry], {
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -176,19 +209,36 @@ function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv =
     let timedOut = false;
     let settled = false;
     let spawned = false;
+    let awaitingReadiness = readyToken !== undefined;
+    let timedOutDuringReadiness = false;
+    let timedOutAfterMs = timeoutMs;
     let childError: Error | undefined;
     let terminationError: Error | undefined;
-    const timeout = setTimeout(() => {
+    let timeout: NodeJS.Timeout | undefined;
+    const expire = (durationMs: number, duringReadiness: boolean): void => {
+      if (settled || timedOut) return;
       timedOut = true;
+      timedOutAfterMs = durationMs;
+      timedOutDuringReadiness = duringReadiness;
       terminationError = terminateOwnedProcessGroup(child, processGroupId);
-    }, timeoutMs);
+    };
+    const armTimeout = (durationMs: number, duringReadiness: boolean): void => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      timeout = setTimeout(() => expire(durationMs, duringReadiness), durationMs);
+    };
     const settle = (callback: () => void): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
       callback();
     };
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout.push(chunk);
+      if (settled || timedOut || !awaitingReadiness || readyToken === undefined) return;
+      if (!Buffer.concat(stdout).includes(readyToken)) return;
+      awaitingReadiness = false;
+      armTimeout(timeoutMs, false);
+    });
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("spawn", () => { spawned = true; });
     child.on("error", (error) => {
@@ -201,15 +251,23 @@ function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv =
     child.on("close", (exitCode) => settle(() => {
       if (timedOut) {
         const detail = terminationError === undefined ? "" : `; ${terminationError.message}`;
-        reject(new Error(`search worker process timed out after ${timeoutMs}ms${detail}`));
+        const message = timedOutDuringReadiness
+          ? `search worker did not become ready after ${timedOutAfterMs}ms`
+          : `search worker process timed out after ${timedOutAfterMs}ms`;
+        reject(new Error(`${message}${detail}`));
         return;
       }
       if (childError !== undefined) {
         reject(childError);
         return;
       }
+      if (awaitingReadiness) {
+        reject(new Error("search worker closed before its readiness token"));
+        return;
+      }
       resolveResult({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
     }));
+    armTimeout(readinessTimeoutMs ?? timeoutMs, readinessTimeoutMs !== undefined);
     child.stdin.end(stdin);
   });
 }
@@ -242,6 +300,20 @@ function terminateDirectChild(child: ReturnType<typeof spawn>): Error | undefine
 
 function isErrno(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+async function expectProcessAbsent(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (isErrno(error, "ESRCH")) return;
+      throw error;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  throw new Error(`descendant process ${pid} remained alive after ${timeoutMs}ms`);
 }
 
 async function runFakeWorker(mode: string, request: unknown, environment: NodeJS.ProcessEnv = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
