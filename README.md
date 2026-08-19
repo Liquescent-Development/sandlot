@@ -4,13 +4,15 @@
 
 <p align="center">
   <a href="https://github.com/Liquescent-Development/sandlot/releases"><img src="https://img.shields.io/github/v/release/Liquescent-Development/sandlot?display_name=tag" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/Liquescent-Development/sandlot/actions/workflows/security.yml?query=branch%3Amain"><img src="https://github.com/Liquescent-Development/sandlot/actions/workflows/security.yml/badge.svg?branch=main" alt="macOS security workflow"></a>
+  <img src="https://img.shields.io/badge/support-macOS%20x64%20%7C%20arm64-brightgreen" alt="macOS x64 and arm64 supported">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0 license"></a>
   <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img src="https://img.shields.io/badge/Pi-0.84.2-5c6ac4" alt="Pi 0.84.2"></a>
 </p>
 
 # Sandlot
 
-Sandlot is a Pi extension that routes Pi's model-controlled shell, filesystem, and search operations through [Anthropic Sandbox Runtime](https://github.com/anthropics/anthropic-experimental/tree/main/sandbox-runtime) (`anthropic-experimental/sandbox-runtime`). Pi remains the trusted host control plane; each protected tool invocation and user `!` command runs in a sandboxed child process and fails closed if Sandlot is unavailable.
+Sandlot is a Pi extension that routes Pi's model-controlled shell, filesystem, and search operations through [Anthropic's experimental Sandbox Runtime](https://github.com/anthropics/anthropic-experimental/tree/main/sandbox-runtime) (`anthropic-experimental/sandbox-runtime`). The underlying macOS Seatbelt boundary comes from Sandbox Runtime. Sandlot owns the Pi integration, policy composition, protected-tool routing, lifecycle management, diagnostics, and fail-closed behavior around that boundary.
 
 ## Why Sandlot?
 
@@ -22,7 +24,7 @@ Prerequisites:
 
 - Node.js 22.19.0 or newer.
 - [Pi 0.84.2](https://github.com/badlogic/pi-mono) (`@earendil-works/pi-coding-agent`).
-- macOS with the built-in `sandbox-exec` facility and `ripgrep` (`brew install ripgrep`).
+- macOS x64 or arm64 with the built-in `sandbox-exec` facility and `ripgrep` (`brew install ripgrep`).
 
 Install the pinned release:
 
@@ -30,11 +32,11 @@ Install the pinned release:
 pi install git:github.com/Liquescent-Development/sandlot@v0.1.0
 ```
 
-Launch Pi in a trusted project, then run `/sandlot`. A `🔒 Sandlot` footer and redacted snapshot confirm that the extension is ready. If initialization fails, protected operations remain blocked; correct the reported prerequisite or policy error and restart Pi.
+Launch Pi in a trusted project, then run `/sandlot`. A `🔒 Sandlot` footer and a snapshot containing `state: ready` confirm that the extension is ready. If initialization fails, protected operations remain blocked; correct the reported prerequisite or policy error and restart Pi. To update, explicitly install a newer reviewed tag with the same command; Sandlot does not silently move this pinned release.
 
 ### Secure defaults
 
-Sandlot denies network access, Unix sockets, local binding, Apple Events, weaker isolation, common credentials, Pi state, and writes outside the workspace by default. Project policy can narrow a trusted user's ceiling but cannot widen it. See the [security guide](docs/security.md) before allowing a network destination, credential, or custom tool.
+Sandlot denies network access, Unix sockets, local binding, Apple Events, weaker isolation, common credentials, and Pi state by default. Project writes inside the workspace are allowed except for protected configuration and security paths, including project `.pi` settings and Git security/configuration files. Project policy can narrow a trusted user's ceiling but cannot widen it. See the [security guide](docs/security.md) before allowing a network destination, credential, or custom tool.
 
 ### Small configuration example
 
@@ -73,4 +75,4 @@ For a local checkout, follow the [development guide](docs/development.md). Pi Gi
 
 ## License
 
-Sandlot is licensed under the [Apache License 2.0](LICENSE).
+Sandlot is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).

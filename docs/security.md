@@ -8,6 +8,10 @@ The trusted host control plane includes the Pi process, model-provider requests,
 
 Defaults deny network access, Unix sockets, local binding, Apple Events, weaker isolation, reads of common credentials and Pi state, and writes outside the workspace or into project security/configuration files. Credential reads include Pi state and common SSH, cloud, GitHub CLI, Docker/container, Cargo, GnuPG, Maven, Gradle, npm, PyPI, Netrc, and Git credential locations; matching environment tokens are withheld. An initialization, ownership, configuration, helper, or sandbox failure leaves protected operations blocked; Sandlot never falls back to Pi's local implementation.
 
+## Responsibility boundaries
+
+Sandlot owns the Pi integration, strict user/project policy composition, protected-tool routing and ownership checks, lifecycle supervision, redacted diagnostics, and fail-closed behavior when setup or cleanup is uncertain. Sandbox Runtime owns enforcement for the sandboxed child process tree and supplies macOS `sandbox-exec`/Seatbelt confinement. Pi, provider requests, extension initialization, and the host process remain outside the extension boundary; Sandlot does not represent them as sandboxed.
+
 ## Limitations
 
 - Linux/Bubblewrap is deferred and unverified for Sandlot 0.1's first release, and Windows is unsupported. Do not interpret extension loading on either as a security boundary.

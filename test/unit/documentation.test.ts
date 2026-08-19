@@ -92,4 +92,32 @@ describe("public documentation", () => {
     expect(configuration).toMatch(/generation-tagged service transport/i);
     expect(configuration).toMatch(/indeterminate termination or cleanup failure is surfaced/i);
   });
+
+  it("states the supported macOS boundary, ownership, and operator contracts", async () => {
+    const [readme, configuration, security, diagnostics, development] = await Promise.all([
+      read("README.md"),
+      read("docs/configuration.md"),
+      read("docs/security.md"),
+      read("docs/diagnostics.md"),
+      read("docs/development.md"),
+    ]);
+
+    expect(readme).toContain("AGPL-3.0");
+    expect(readme).not.toContain("Apache-2.0");
+    expect(readme).toContain("actions/workflows/security.yml/badge.svg?branch=main");
+    expect(readme).toMatch(/macOS.*(?:x64|arm64)/i);
+    expect(readme).toContain("state: ready");
+    expect(readme).toMatch(/Seatbelt[\s\S]*Sandbox Runtime/i);
+    expect(readme).toMatch(/Sandlot[\s\S]*policy composition[\s\S]*protected-tool routing[\s\S]*diagnostics/i);
+    expect(readme).toMatch(/project writes[\s\S]*allowed[\s\S]*protected.*(?:configuration|security)/i);
+    expect(readme).toMatch(/explicitly install a newer.*tag/i);
+    expect(configuration).toMatch(/^## Explicit disable$/m);
+    expect(configuration).toMatch(/Warning:[\s\S]*disables the security boundary/i);
+    expect(security).toMatch(/^## Responsibility boundaries$/m);
+    expect(security).toMatch(/Sandlot owns[\s\S]*Sandbox Runtime owns/i);
+    expect(diagnostics).toMatch(/^## Local verification$/m);
+    expect(development).toMatch(/^## Prerequisites$/m);
+    expect(development).toMatch(/^## Contributing$/m);
+    expect(development).toMatch(/single.*`npm run release:verify`/i);
+  });
 });

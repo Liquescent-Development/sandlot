@@ -10,4 +10,8 @@ Run `/sandlot-reload` after editing policy; it invokes Pi's reload lifecycle so 
 
 Run `/sandlot graph` to verify that the installed extension resolves the exact Pi 0.84.2 host image pipeline and its pinned Photon module/WASM. The result reports only package versions, containment, and presence counts; it does not expose host paths.
 
+## Local verification
+
+From a trusted local checkout, run `npm run build`, install the checkout with `pi install "$(pwd)"`, launch Pi in that checkout, and run `/sandlot`. Confirm the footer shows `🔒 Sandlot` and the redacted snapshot reports `state: ready`. If it does not, do not continue with protected operations: correct the reported prerequisite or policy error, then reload or restart Pi.
+
 For policy changes, consult [Configuration](configuration.md). For boundary limitations, consult [Security](security.md).

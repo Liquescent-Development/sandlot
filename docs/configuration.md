@@ -11,7 +11,16 @@ Sandlot reads strict JSON objects from these exact locations:
 
 ## User policy
 
-The curated user schema accepts `enabled`; `network`; `filesystem`; `credentials`; `environment`; `trustedCustomTools`; `enableWeakerNestedSandbox`; `enableWeakerNetworkIsolation`; `allowAppleEvents`; `ripgrep`; `seccomp`; `bwrapPath`; and `socatPath`. Network access always uses a strict allowlist. The full schema and semantics are in [SPEC.md](../SPEC.md).
+The strict user-policy object accepts these controls:
+
+- `enabled` enables or disables Sandlot for the trusted user.
+- `network` accepts `allowedDomains`, `deniedDomains`, `deniedDomainReasons`, `allowUnixSockets`, `allowAllUnixSockets`, `allowLocalBinding`, `allowMachLookup`, and `tlsTerminate`. `tlsTerminate` accepts `caCertPath`, `caKeyPath`, `excludeDomains`, and `extraCaCertPaths`. Network access always uses a strict allowlist.
+- `filesystem` accepts `disabled`, `denyRead`, `allowRead`, `allowWrite`, `denyWrite`, and `allowGitConfig`.
+- `credentials` accepts `files`, `envVars`, `allowPlaintextInject`, `awsPairs`, and `sigv4`. File credentials use `path`, `mode`, and optional `extract`, `onExtractNoMatch`, `decode`, `maskClaims`, `maskDuplicates`, and `injectHosts`; environment credentials use the corresponding `name` form. AWS pairs name access-key, secret-key, and optional session-token variables. `sigv4` controls `streaming`, `presigned`, and `sigv4a`.
+- `environment` accepts `passThrough`, `deny`, and `exposePiSessionMetadata`.
+- `trustedCustomTools`, `enableWeakerNestedSandbox`, `enableWeakerNetworkIsolation`, `allowAppleEvents`, `ripgrep.command`, `seccomp.applyPath`, `seccomp.argv0`, `bwrapPath`, and `socatPath` control trusted extensions and platform/runtime integration.
+
+The full schema and composition semantics are in [SPEC.md](../SPEC.md).
 
 A secure user policy can permit one API and CI metadata while preserving the default credential deny list:
 
@@ -42,7 +51,7 @@ Credential entries default to denial. Masked, host-scoped injection requires `ne
 
 ## Project policy
 
-The project schema deliberately exposes only narrowing controls: network allow/deny lists and sockets, filesystem allow/deny lists, `trustedCustomTools`, and false-only forms of broad permissions or weaker isolation. A project allowlist must be covered by the user allowlist; project read/write paths must stay within user-granted paths; deny lists are unioned; and a project may remove trusted tools or dangerous capabilities but cannot add them.
+The project schema deliberately exposes only narrowing controls. Its `network` object accepts `allowedDomains`, `deniedDomains`, `allowUnixSockets`, `allowMachLookup`, and false-only `allowAllUnixSockets` and `allowLocalBinding`. Its `filesystem` object accepts `denyRead`, `allowRead`, `allowWrite`, `denyWrite`, and false-only `disabled` and `allowGitConfig`. The top-level project controls are `trustedCustomTools` plus false-only `enableWeakerNestedSandbox`, `enableWeakerNetworkIsolation`, and `allowAppleEvents`. A project allowlist must be covered by the user allowlist; project read/write paths must stay within user-granted paths; deny lists are unioned; and a project may remove trusted tools or dangerous capabilities but cannot add them.
 
 A trusted project can tighten that ceiling:
 
@@ -62,6 +71,21 @@ A trusted project can tighten that ceiling:
 ```
 
 Custom `credentials.files` paths must use their canonical spelling; Sandlot rejects a symlink in the final path or any parent instead of silently trusting its target. Project policy cannot set `enabled`, so repository content cannot disable protection or widen the user ceiling.
+
+## Explicit disable
+
+> **Warning:** setting `"enabled": false` disables the security boundary. Protected operations then run locally on the host.
+
+Only the trusted user policy at `~/.pi/agent/sandlot.json` may disable Sandlot:
+
+<!-- sandlot-policy: user -->
+```json
+{
+  "enabled": false
+}
+```
+
+Project policy cannot disable Sandlot. Remove the setting and run `/sandlot-reload` (or restart Pi) to restore protection.
 
 ## Temporary data and diagnostics
 
