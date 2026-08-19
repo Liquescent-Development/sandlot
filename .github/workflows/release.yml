@@ -44,7 +44,9 @@ jobs:
 
       - name: Install locked dependencies
         shell: bash
-        run: npm ci
+        run: |
+          set -euo pipefail
+          npm ci
 
       - name: Generate validated release metadata
         shell: bash
@@ -203,6 +205,8 @@ jobs:
             const API_VERSION = "2026-03-10";
             const headers = { "X-GitHub-Api-Version": API_VERSION };
             const MAX_TARBALL_BYTES = 1024 * 1024 * 1024;
+            const MAX_ASSET_POLLS = 5;
+            const ASSET_POLL_DELAY_MS = 500;
             const root = path.resolve(process.env.HANDOFF_ROOT);
             const artifactDir = path.join(root, "artifact");
             const metadataDir = path.join(root, "metadata");
@@ -311,6 +315,30 @@ jobs:
               if (matching.length > 1) throw new Error("ambiguous duplicate releases exist");
               if (matching.length !== 0) throw new Error("release or draft already exists");
             }
+            async function requireClaimedTag() {
+              const tag = await getRef(`tags/${handoff.tag}`);
+              if (
+                tag.data?.ref !== `refs/tags/${handoff.tag}`
+                || tag.data?.object?.type !== "commit"
+                || tag.data.object.sha !== handoff.commit
+              ) throw new Error("claimed release tag does not point to the verified commit");
+            }
+            async function claimReleaseTag() {
+              let response;
+              try {
+                response = await github.request("POST /repos/{owner}/{repo}/git/refs", {
+                  owner, repo, ref: `refs/tags/${handoff.tag}`, sha: handoff.commit, headers,
+                });
+              } catch (error) {
+                throw new Error(`failed to claim release tag ${handoff.tag}`, { cause: error });
+              }
+              if (
+                response.data?.ref !== `refs/tags/${handoff.tag}`
+                || response.data?.object?.type !== "commit"
+                || response.data.object.sha !== handoff.commit
+              ) throw new Error("GitHub returned an invalid claimed release tag");
+              await requireClaimedTag();
+            }
             async function createDraftRelease() {
               const response = await github.request("POST /repos/{owner}/{repo}/releases", {
                 owner, repo,
@@ -323,7 +351,15 @@ jobs:
                 headers,
               });
               if (Number.isSafeInteger(response.data?.id)) draft = { id: response.data.id };
-              if (!Number.isSafeInteger(response.data?.id) || response.data.draft !== true || response.data.tag_name !== handoff.tag) {
+              const uploadUrl = Number.isSafeInteger(response.data?.id)
+                ? `https://uploads.github.com/repos/${owner}/${repo}/releases/${response.data.id}/assets{?name,label}`
+                : undefined;
+              if (
+                !Number.isSafeInteger(response.data?.id) || response.data.id < 1
+                || response.data.draft !== true || response.data.tag_name !== handoff.tag
+                || response.data.target_commitish !== handoff.commit
+                || response.data.upload_url !== uploadUrl
+              ) {
                 throw new Error("GitHub returned an invalid draft release");
               }
               return response.data;
@@ -350,22 +386,36 @@ jobs:
                 seen.add(asset.name);
                 const wanted = expected.get(asset.name);
                 if (wanted === undefined || asset.size !== wanted.size) throw new Error("release asset name or size is invalid");
-                if (asset.digest !== undefined && asset.digest !== null && asset.digest !== `sha256:${wanted.digest}`) {
-                  throw new Error("release asset server digest is invalid");
-                }
+                if (asset.state !== "uploaded") throw new Error("release asset is not fully uploaded");
+                if (asset.digest !== `sha256:${wanted.digest}`) throw new Error("release asset server digest is invalid");
               }
               if (seen.size !== expected.size) throw new Error("release is missing an expected asset");
             }
+            async function waitForVerifiedAssets(releaseId) {
+              let lastError;
+              for (let attempt = 0; attempt < MAX_ASSET_POLLS; attempt += 1) {
+                try {
+                  requireAssets(await listAssets(releaseId));
+                  return;
+                } catch (error) {
+                  lastError = error;
+                  if (attempt + 1 < MAX_ASSET_POLLS) {
+                    await new Promise((resolve) => setTimeout(resolve, ASSET_POLL_DELAY_MS));
+                  }
+                }
+              }
+              throw lastError;
+            }
             async function uploadAndVerifyReleaseAssets() {
-              await github.request("POST /repos/{owner}/{repo}/releases/{release_id}/assets{?name,label}", {
-                owner, repo, release_id: draft.id, name: handoff.tarball, data: tarball,
+              await github.request(`POST ${draft.upload_url}`, {
+                name: handoff.tarball, data: tarball,
                 headers: { ...headers, "content-type": "application/gzip", "content-length": tarball.length },
               });
-              await github.request("POST /repos/{owner}/{repo}/releases/{release_id}/assets{?name,label}", {
-                owner, repo, release_id: draft.id, name: handoff.checksum, data: checksum,
+              await github.request(`POST ${draft.upload_url}`, {
+                name: handoff.checksum, data: checksum,
                 headers: { ...headers, "content-type": "text/plain; charset=utf-8", "content-length": checksum.length },
               });
-              requireAssets(await listAssets(draft.id));
+              await waitForVerifiedAssets(draft.id);
             }
             async function publishDraftRelease() {
               const response = await github.request("PATCH /repos/{owner}/{repo}/releases/{release_id}", {
@@ -386,7 +436,7 @@ jobs:
                 || release.tag_name !== handoff.tag || release.target_commitish !== handoff.commit
                 || release.body !== releaseNotes
               ) throw new Error("published release is not the expected immutable release");
-              requireAssets(await listAssets(release.id));
+              await waitForVerifiedAssets(release.id);
               const tag = await getRef(`tags/${handoff.tag}`);
               if (tag.data?.object?.type !== "commit" || tag.data.object.sha !== handoff.commit) {
                 throw new Error("published tag does not point to the verified commit");
@@ -395,8 +445,10 @@ jobs:
 
             try {
               await authoritativeRemoteRecheck();
+              await claimReleaseTag();
               draft = await createDraftRelease();
               await uploadAndVerifyReleaseAssets();
+              await requireClaimedTag();
               await publishDraftRelease();
               await assertImmutablePublicRelease();
             } catch (error) {

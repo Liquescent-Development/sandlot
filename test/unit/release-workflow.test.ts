@@ -24,6 +24,7 @@ const orderedStages = [
   "name: Upload verified handoff",
   "name: Download verified handoff",
   "await authoritativeRemoteRecheck();",
+  "await claimReleaseTag();",
   "draft = await createDraftRelease();",
   "await uploadAndVerifyReleaseAssets();",
   "await publishDraftRelease();",
@@ -60,6 +61,14 @@ describe("stable release workflow", () => {
     }
   });
 
+  it("starts every Bash run step in strict fail-fast mode", async () => {
+    // A single-line shell step without strict mode can silently ignore a failed command after later expansion.
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const scripts = runScripts(workflow);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const script of scripts) expect(script).toMatch(/^set -euo pipefail(?:\n|$)/);
+  });
+
   it("rejects omitted or reordered release stages", async () => {
     const workflow = await readFile(WORKFLOW_URL, "utf8");
     const removed = orderedStages.map((stage, index) => workflow.replace(stage, `removed-release-stage-${index}`));
@@ -80,8 +89,9 @@ describe("stable release workflow", () => {
       workflow.replace("on:\n  workflow_dispatch:", "on:\n  push:\n    branches: [main]\n  workflow_dispatch:"),
       workflow.replace("on:\n  workflow_dispatch:", "on:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_dispatch:"),
       workflow.replace(pins[0], "actions/checkout@main"),
-      workflow.replace("run: npm ci", "run: npm ci ${{ inputs.version }}"),
+      workflow.replace("          npm ci", "          npm ci ${{ inputs.version }}"),
       workflow.replace("await assertImmutablePublicRelease();", "await Promise.resolve();"),
+      workflow.replace("await claimReleaseTag();", "await claimReleaseTag();\n              await github.request(\"DELETE /repos/{owner}/{repo}/git/refs/{ref}\", { owner, repo, ref: `tags/${handoff.tag}` });"),
     ];
 
     expect(mutants.every((mutant) => !acceptsReleaseWorkflow(mutant))).toBe(true);
@@ -131,23 +141,32 @@ describe("stable release workflow", () => {
         writeFile(join(root, "metadata", "release-notes.md"), "Release notes.\n"),
       ]);
 
+      let tagClaimed = false;
       const github = {
         paginate: async () => [],
-        request: async (route: string) => {
+        request: async (route: string, request: Record<string, unknown>) => {
           if (route === "GET /repos/{owner}/{repo}/git/ref/{ref}") {
-            if (!githubMainReturned) {
-              githubMainReturned = true;
+            if (request.ref === "heads/main") {
               return { data: { object: { type: "commit", sha: commit } } };
+            }
+            if (tagClaimed) {
+              return { data: { ref: `refs/tags/${tag}`, object: { type: "commit", sha: commit } } };
             }
             throw Object.assign(new Error("not found"), { status: 404 });
           }
+          if (route === "POST /repos/{owner}/{repo}/git/refs") {
+            tagClaimed = true;
+            return { data: { ref: `refs/tags/${tag}`, object: { type: "commit", sha: commit } } };
+          }
           if (route === "POST /repos/{owner}/{repo}/releases") {
-            return { data: { id: 71, draft: true, tag_name: "malformed-tag" } };
+            return { data: {
+              id: 71, draft: true, tag_name: "malformed-tag", target_commitish: commit,
+              upload_url: "https://uploads.github.com/repos/Liquescent-Development/sandlot/releases/71/assets{?name,label}",
+            } };
           }
           throw new Error(`unexpected request: ${route}`);
         },
       };
-      let githubMainReturned = false;
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
       const execute = new AsyncFunction("require", "process", "context", "github", "core", stepJavascript(workflow, "Publish verified immutable release"));
 
@@ -164,6 +183,56 @@ describe("stable release workflow", () => {
       expect(diagnostics[0]).toContain(tag);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("executes the complete atomic immutable-release publication state machine", async () => {
+    // Omitting the atomic tag claim, upload hypermedia URL, or boundary checks could publish unverified state.
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const harness = await createPublicationHarness(workflow);
+    try {
+      await expect(harness.execute()).resolves.toBeUndefined();
+      expect(harness.state.published).toBe(true);
+      expect(harness.events.indexOf("claim-tag")).toBeLessThan(harness.events.indexOf("create-draft"));
+      expect(harness.uploadRoutes).toEqual([harness.fullUploadRoute, harness.fullUploadRoute]);
+      const assetsVerified = harness.events.indexOf("list-assets");
+      const published = harness.events.indexOf("publish-draft");
+      expect(assetsVerified).toBeLessThan(published);
+      expect(harness.events.slice(assetsVerified + 1, published)).toContain("verify-tag");
+      expect(harness.events.at(-1)).toBe("verify-tag");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("fails closed when another publisher wins the atomic tag claim", async () => {
+    // A check-then-create release flow would let an existing raced tag redirect the release target.
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const harness = await createPublicationHarness(workflow, { tagClaimRace: true });
+    try {
+      await expect(harness.execute()).rejects.toThrow(/claim release tag/i);
+      expect(harness.state.draftCreated).toBe(false);
+      expect(harness.state.published).toBe(false);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it.each([
+    ["missing digest", { digest: "missing" as const }],
+    ["null digest", { digest: "null" as const }],
+    ["wrong digest", { digest: "wrong" as const }],
+    ["non-uploaded state", { state: "starter" as const }],
+  ])("refuses to publish an asset with %s", async (_condition, asset) => {
+    // Publishing before GitHub reports uploaded state and the exact server digest would make the immutable result unverifiable.
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const harness = await createPublicationHarness(workflow, { asset });
+    try {
+      await expect(harness.execute()).rejects.toThrow(/release asset/i);
+      expect(harness.state.published).toBe(false);
+      expect(harness.state.assetPolls).toBeGreaterThan(1);
+    } finally {
+      await harness.cleanup();
     }
   });
 });
@@ -193,7 +262,7 @@ function assertReleaseWorkflow(workflow: string): void {
   expect(verify).toContain("fetch-depth: 0");
   expect(verify).toContain("node-version: 22.19.0");
   expect(verify).toContain("brew install ripgrep");
-  expect(verify).toContain("run: npm ci");
+  expect(verify).toContain("npm ci");
   expect(verify).toContain("--notes-fd 8");
   expect(verify).toContain("--metadata-fd 9");
   expect(verify).toContain("--notes-file release-notes.md");
@@ -225,6 +294,7 @@ function assertReleaseWorkflow(workflow: string): void {
   expect(publish).toContain("if (seen.has(asset.name))");
   expect(publish).toContain("seen.add(asset.name);");
   expect(publish).not.toMatch(/deleteRelease|deleteRef|updateRef|createRef/);
+  expect(publish).not.toMatch(/(?:DELETE .*\/(?:git\/refs|releases)|PATCH .*\/git\/refs)/);
 
   for (const pin of pins) expect(workflow).toContain(pin);
   expect(actionsIn(verify)).toEqual([pins[0], pins[1], pins[4], pins[2]]);
@@ -285,6 +355,176 @@ function stepJavascript(workflow: string, name: string): string {
   return `${body.split("\n").map((line) => line.startsWith("            ") ? line.slice(12) : line).join("\n")}\n`;
 }
 
+function runScripts(workflow: string): string[] {
+  const lines = workflow.split("\n");
+  const scripts: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^(\s*)run:\s*(.*)$/.exec(lines[index]!);
+    if (match === null) continue;
+    if (match[2] !== "|") {
+      scripts.push(match[2]!);
+      continue;
+    }
+    const indentation = match[1]!.length + 2;
+    const body: string[] = [];
+    for (index += 1; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      if (line.length > 0 && line.length - line.trimStart().length < indentation) {
+        index -= 1;
+        break;
+      }
+      body.push(line.startsWith(" ".repeat(indentation)) ? line.slice(indentation) : line);
+    }
+    scripts.push(body.join("\n").replace(/\n+$/, ""));
+  }
+  return scripts;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+type AssetFault = {
+  digest?: "exact" | "missing" | "null" | "wrong";
+  state?: "uploaded" | "starter";
+};
+
+async function createPublicationHarness(
+  workflow: string,
+  options: { tagClaimRace?: boolean; asset?: AssetFault } = {},
+) {
+  const root = await mkdtemp(join(tmpdir(), "sandlot-release-state-machine-"));
+  const owner = "Liquescent-Development";
+  const repo = "sandlot";
+  const version = "0.1.0";
+  const tag = `v${version}`;
+  const commit = "a".repeat(40);
+  const tarballName = `sandlot-${version}.tgz`;
+  const checksumName = `${tarballName}.sha256`;
+  const tarball = Buffer.from("verified tarball\n", "utf8");
+  const tarballDigest = createHash("sha256").update(tarball).digest("hex");
+  const checksum = Buffer.from(`${tarballDigest}  ${tarballName}\n`, "utf8");
+  const uploadUrl = `https://uploads.github.com/repos/${owner}/${repo}/releases/71/assets{?name,label}`;
+  const fullUploadRoute = `POST ${uploadUrl}`;
+  const events: string[] = [];
+  const uploadRoutes: string[] = [];
+  const assets: Array<Record<string, unknown>> = [];
+  const state = { claimed: false, draftCreated: false, published: false, assetPolls: 0 };
+
+  await Promise.all([
+    mkdir(join(root, "artifact"), { mode: 0o700 }),
+    mkdir(join(root, "metadata"), { mode: 0o700 }),
+  ]);
+  await Promise.all([
+    writeFile(join(root, "artifact", "release-handoff.json"), JSON.stringify({
+      version, tag, commit, tarball: tarballName, checksum: checksumName,
+      tarballBytes: tarball.length, sha256: tarballDigest,
+    })),
+    writeFile(join(root, "artifact", tarballName), tarball),
+    writeFile(join(root, "artifact", checksumName), checksum),
+    writeFile(join(root, "metadata", "release-metadata.json"), JSON.stringify({
+      version, tag, notesFile: "release-notes.md",
+    })),
+    writeFile(join(root, "metadata", "release-notes.md"), "Release notes.\n"),
+  ]);
+
+  const github = {
+    paginate: async (route: string) => {
+      if (route === "GET /repos/{owner}/{repo}/releases") {
+        events.push("list-releases");
+        return [];
+      }
+      if (route === "GET /repos/{owner}/{repo}/releases/{release_id}/assets") {
+        events.push("list-assets");
+        state.assetPolls += 1;
+        return assets.map((asset) => ({ ...asset }));
+      }
+      throw new Error(`unexpected pagination: ${route}`);
+    },
+    request: async (route: string, request: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/git/ref/{ref}") {
+        if (request.ref === "heads/main") {
+          events.push("get-main");
+          return { data: { object: { type: "commit", sha: commit } } };
+        }
+        if (request.ref === `tags/${tag}`) {
+          if (!state.claimed) {
+            events.push("tag-absent");
+            throw Object.assign(new Error("not found"), { status: 404 });
+          }
+          events.push("verify-tag");
+          return { data: { ref: `refs/tags/${tag}`, object: { type: "commit", sha: commit } } };
+        }
+      }
+      if (route === "POST /repos/{owner}/{repo}/git/refs") {
+        events.push("claim-tag");
+        if (options.tagClaimRace) throw Object.assign(new Error("reference already exists"), { status: 422 });
+        if (request.ref !== `refs/tags/${tag}` || request.sha !== commit) throw new Error("invalid tag claim");
+        state.claimed = true;
+        return { data: { ref: `refs/tags/${tag}`, object: { type: "commit", sha: commit } } };
+      }
+      if (route === "POST /repos/{owner}/{repo}/releases") {
+        events.push("create-draft");
+        state.draftCreated = true;
+        return { data: { id: 71, draft: true, tag_name: tag, target_commitish: commit, upload_url: uploadUrl } };
+      }
+      if (
+        route === fullUploadRoute
+        || (route === "POST /repos/{owner}/{repo}/releases/{release_id}/assets{?name,label}" && request.release_id === 71)
+      ) {
+        events.push("upload-asset");
+        uploadRoutes.push(route);
+        const data = request.data;
+        if (!Buffer.isBuffer(data) || typeof request.name !== "string") throw new Error("invalid asset upload");
+        const exactDigest = createHash("sha256").update(data).digest("hex");
+        const fault = options.asset ?? {};
+        const asset: Record<string, unknown> = {
+          name: request.name,
+          size: data.length,
+          state: fault.state ?? "uploaded",
+          digest: fault.digest === "wrong" ? `sha256:${"b".repeat(64)}` : `sha256:${exactDigest}`,
+        };
+        if (fault.digest === "missing") delete asset.digest;
+        if (fault.digest === "null") asset.digest = null;
+        assets.push(asset);
+        return { data: asset };
+      }
+      if (route === "PATCH /repos/{owner}/{repo}/releases/{release_id}") {
+        events.push("publish-draft");
+        state.published = true;
+        state.claimed = true;
+        return { data: { id: 71, draft: false, tag_name: tag } };
+      }
+      if (route === "GET /repos/{owner}/{repo}/releases/tags/{tag}") {
+        events.push("get-public-release");
+        return { data: {
+          id: 71, draft: false, prerelease: false, immutable: true,
+          tag_name: tag, target_commitish: commit, body: "Release notes.\n",
+        } };
+      }
+      throw new Error(`unexpected request: ${route}`);
+    },
+  };
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const executeScript = new AsyncFunction(
+    "require", "process", "context", "github", "core", "setTimeout",
+    stepJavascript(workflow, "Publish verified immutable release"),
+  );
+
+  return {
+    events,
+    uploadRoutes,
+    uploadUrl,
+    fullUploadRoute,
+    state,
+    execute: () => executeScript(
+      createRequire(import.meta.url),
+      { env: { HANDOFF_ROOT: root } },
+      { repo: { owner, repo } },
+      github,
+      { error: () => undefined },
+      (callback: () => void) => { callback(); return 0; },
+    ),
+    cleanup: () => rm(root, { recursive: true, force: true }),
+  };
 }
