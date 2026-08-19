@@ -122,7 +122,7 @@ describe("search worker process", { timeout: WORKER_TEST_TIMEOUT_MS }, () => {
     const marker = join(directory, "timed-out-descendant.txt");
     const pidFile = join(directory, "timed-out-descendant.pid");
     const hangingEntry = join(directory, "hanging-worker.mjs");
-    await writeFile(hangingEntry, `import { existsSync } from "node:fs";
+    await writeFile(hangingEntry, `import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 setTimeout(() => {
   const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
@@ -137,6 +137,7 @@ setTimeout(() => {
   descendant.unref();
   const readiness = setInterval(() => {
     if (!existsSync(process.env.SANDLOT_FAKE_MARKER) || !existsSync(process.env.SANDLOT_FAKE_PID_FILE)) return;
+    if (!readFileSync(process.env.SANDLOT_FAKE_MARKER, "utf8").includes("beat\\n")) return;
     clearInterval(readiness);
     process.stdout.write("descendant-ready\\n");
   }, 10);
@@ -151,7 +152,7 @@ setInterval(() => undefined, 1000);
       .rejects.toThrow("search worker process timed out after 100ms");
     const descendantPid = Number(await readFile(pidFile, "utf8"));
     expect(descendantPid).toBeGreaterThan(0);
-    await expect(readFile(marker, "utf8")).resolves.toMatch(/^started\n(?:beat\n)*$/);
+    await expect(readFile(marker, "utf8")).resolves.toMatch(/^started\n(?:beat\n)+$/);
     await expectProcessAbsent(descendantPid, 2_000);
   });
 
@@ -164,6 +165,34 @@ setInterval(() => undefined, 1000);
       readyToken: "never-ready\n",
       readinessTimeoutMs: 250,
     })).rejects.toThrow("search worker did not become ready after 250ms");
+  });
+
+  it("cleans descendants when the worker closes before readiness", async () => {
+    const pidFile = join(directory, "closed-before-ready-descendant.pid");
+    const earlyCloseEntry = join(directory, "closed-before-ready-worker.mjs");
+    await writeFile(earlyCloseEntry, `import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
+  const { writeFileSync } = require("node:fs");
+  writeFileSync(process.argv[1], String(process.pid));
+  setTimeout(() => process.exit(0), 5000);
+`)}, process.env.SANDLOT_FAKE_PID_FILE], { stdio: "ignore" });
+descendant.unref();
+const closeWhenStarted = setInterval(() => {
+  if (!existsSync(process.env.SANDLOT_FAKE_PID_FILE)) return;
+  clearInterval(closeWhenStarted);
+  process.exit(0);
+}, 10);
+`);
+
+    await expect(runEntry(earlyCloseEntry, "", { SANDLOT_FAKE_PID_FILE: pidFile }, {
+      timeoutMs: 100,
+      readyToken: "never-ready\n",
+      readinessTimeoutMs: 10_000,
+    })).rejects.toThrow("search worker closed before its readiness token");
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+    expect(descendantPid).toBeGreaterThan(0);
+    await expectProcessAbsent(descendantPid, 2_000);
   });
 
   it("rejects file/search worker requests at the wrong fixed worker entry point", async () => {
@@ -248,25 +277,31 @@ function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv =
       }
       childError ??= error;
     });
-    child.on("close", (exitCode) => settle(() => {
-      if (timedOut) {
-        const detail = terminationError === undefined ? "" : `; ${terminationError.message}`;
-        const message = timedOutDuringReadiness
-          ? `search worker did not become ready after ${timedOutAfterMs}ms`
-          : `search worker process timed out after ${timedOutAfterMs}ms`;
-        reject(new Error(`${message}${detail}`));
-        return;
+    child.on("close", (exitCode) => {
+      if (!timedOut && awaitingReadiness) {
+        terminationError = terminateOwnedProcessGroup(child, processGroupId);
       }
-      if (childError !== undefined) {
-        reject(childError);
-        return;
-      }
-      if (awaitingReadiness) {
-        reject(new Error("search worker closed before its readiness token"));
-        return;
-      }
-      resolveResult({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
-    }));
+      settle(() => {
+        if (timedOut) {
+          const detail = terminationError === undefined ? "" : `; ${terminationError.message}`;
+          const message = timedOutDuringReadiness
+            ? `search worker did not become ready after ${timedOutAfterMs}ms`
+            : `search worker process timed out after ${timedOutAfterMs}ms`;
+          reject(new Error(`${message}${detail}`));
+          return;
+        }
+        if (childError !== undefined) {
+          reject(childError);
+          return;
+        }
+        if (awaitingReadiness) {
+          const detail = terminationError === undefined ? "" : `; ${terminationError.message}`;
+          reject(new Error(`search worker closed before its readiness token${detail}`));
+          return;
+        }
+        resolveResult({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+      });
+    });
     armTimeout(readinessTimeoutMs ?? timeoutMs, readinessTimeoutMs !== undefined);
     child.stdin.end(stdin);
   });
