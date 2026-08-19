@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, open, readFile, realpath, rename, rm } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -128,15 +128,17 @@ async function outputRoot() {
 }
 
 async function safeOutputPath(root, requestedPath) {
-  if (typeof requestedPath !== "string" || requestedPath.length === 0 || isAbsolute(requestedPath)) {
+  if (
+    typeof requestedPath !== "string"
+    || requestedPath.length === 0
+    || isAbsolute(requestedPath)
+    || requestedPath !== basename(requestedPath)
+    || requestedPath === "."
+    || requestedPath === ".."
+  ) {
     throw new Error("release output path is invalid");
   }
   const target = resolve(root, requestedPath);
-  const remainder = relative(root, target);
-  if (remainder === "" || remainder === ".." || remainder.startsWith(`..${sep}`) || isAbsolute(remainder)) {
-    throw new Error("release output path is outside the allowed directory");
-  }
-  await assertSafeParent(root, dirname(target));
   try {
     const info = await lstat(target);
     if (info.isSymbolicLink() || !info.isFile()) throw new Error("release output path is not a regular file");
@@ -144,23 +146,6 @@ async function safeOutputPath(root, requestedPath) {
     if (error?.code !== "ENOENT") throw error;
   }
   return target;
-}
-
-async function assertSafeParent(root, parent) {
-  let current = parent;
-  while (true) {
-    const info = await lstat(current);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("release output parent is invalid");
-    if (current === root) return;
-    const next = dirname(current);
-    if (next === current || !isWithin(root, next)) throw new Error("release output path is outside the allowed directory");
-    current = next;
-  }
-}
-
-function isWithin(root, candidate) {
-  const remainder = relative(root, candidate);
-  return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== ".." && !isAbsolute(remainder));
 }
 
 async function writeOutputs(outputs) {

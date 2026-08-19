@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,10 +93,21 @@ describe("release metadata", () => {
     expect(() => validateReleaseMetadata(releaseInput({ manifest, lockfile }))).toThrow();
   });
 
-  it("rejects missing and inherited manifest fields", () => {
-    // Reading inherited or absent fields would trust values JSON manifests cannot legitimately contain.
-    expect(() => validateReleaseMetadata(releaseInput({ manifest: {} }))).toThrow();
-    expect(() => validateReleaseMetadata(releaseInput({ manifest: Object.create({ version: "0.1.0" }) }))).toThrow();
+  it.each([
+    ["a missing manifest version", { manifest: {} }],
+    ["a malformed manifest version", { manifest: { version: 1 } }],
+    ["an inherited manifest version", { manifest: Object.create({ version: "0.1.0" }) }],
+    ["a missing lockfile version", { lockfile: { packages: { "": { version: "0.1.0" } } } }],
+    ["a malformed lockfile version", { lockfile: { version: 1, packages: { "": { version: "0.1.0" } } } }],
+    ["a missing lockfile packages object", { lockfile: { version: "0.1.0" } }],
+    ["a malformed lockfile packages object", { lockfile: { version: "0.1.0", packages: [] } }],
+    ["a missing lockfile root package", { lockfile: { version: "0.1.0", packages: {} } }],
+    ["a malformed lockfile root package", { lockfile: { version: "0.1.0", packages: { "": 1 } } }],
+    ["a missing lockfile root-package version", { lockfile: { version: "0.1.0", packages: { "": {} } } }],
+    ["a malformed lockfile root-package version", { lockfile: { version: "0.1.0", packages: { "": { version: 1 } } } }],
+  ])("rejects %s", (_reason, overrides) => {
+    // Skipping any untrusted manifest shape check would let incomplete release metadata pass validation.
+    expect(() => validateReleaseMetadata(releaseInput(overrides))).toThrow();
   });
 
   it("returns the release tag and extracted notes for matching metadata", () => {
@@ -165,6 +176,30 @@ describe("release metadata", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects nested output paths before a parent replacement can escape the runner root", async () => {
+    // Reintroducing check-then-use traversal of a nested parent would write release notes outside RUNNER_TEMP.
+    const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
+    const outside = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-outside-"));
+    try {
+      await writeFixture(root);
+      const nested = join(root, "nested");
+      await mkdir(nested);
+      await demonstrateOldParentReplacementEscape(nested, outside);
+      expect(await readFile(join(outside, "escaped-notes.md"), "utf8")).toBe("old unsafe output\n");
+      await rm(join(outside, "escaped-notes.md"));
+      await rm(nested);
+      await mkdir(nested);
+
+      const result = runCli(root, ["--version", "0.1.0", "--notes-out", "nested/release-notes.md", "--metadata-out", "metadata.json"]);
+      expect(result.status).toBe(1);
+      await expect(readFile(join(outside, "release-notes.md"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(root, "metadata.json"), "utf8")).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 async function writeFixture(root: string): Promise<void> {
@@ -182,4 +217,14 @@ function runCli(cwd: string, args: string[]) {
     encoding: "utf8",
     env: { PATH: process.env.PATH, RUNNER_TEMP: cwd },
   });
+}
+
+async function demonstrateOldParentReplacementEscape(parent: string, outside: string): Promise<void> {
+  const target = join(parent, "escaped-notes.md");
+  const temporary = `${target}.tmp`;
+  await lstat(parent);
+  await rm(parent, { recursive: true });
+  await symlink(outside, parent, "dir");
+  await writeFile(temporary, "old unsafe output\n");
+  await rename(temporary, target);
 }
