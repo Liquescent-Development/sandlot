@@ -77,16 +77,15 @@ jobs:
           [[ -f "$notes_path" && ! -L "$notes_path" ]]
           [[ -f "$metadata_path" && ! -L "$metadata_path" ]]
 
-          exec {notes_fd}<>"$notes_path"
-          exec {metadata_fd}<>"$metadata_path"
-          [[ "$notes_fd" -ne "$metadata_fd" ]]
+          exec 8<>"$notes_path"
+          exec 9<>"$metadata_path"
           node scripts/release-metadata.mjs \
             --version "$RELEASE_VERSION" \
-            --notes-fd "$notes_fd" \
-            --metadata-fd "$metadata_fd" \
+            --notes-fd 8 \
+            --metadata-fd 9 \
             --notes-file release-notes.md
-          exec {notes_fd}>&-
-          exec {metadata_fd}>&-
+          exec 8>&-
+          exec 9>&-
 
           [[ -s "$notes_path" && -s "$metadata_path" ]]
           [[ "$(stat -f '%Lp' "$notes_path")" == "600" ]]
@@ -323,6 +322,7 @@ jobs:
                 prerelease: false,
                 headers,
               });
+              if (Number.isSafeInteger(response.data?.id)) draft = { id: response.data.id };
               if (!Number.isSafeInteger(response.data?.id) || response.data.draft !== true || response.data.tag_name !== handoff.tag) {
                 throw new Error("GitHub returned an invalid draft release");
               }
@@ -400,8 +400,7 @@ jobs:
               await publishDraftRelease();
               await assertImmutablePublicRelease();
             } catch (error) {
-              if (draft?.id !== undefined) {
-                core.error(`Draft-stage failure left release ${draft.id} for ${handoff.tag}; inspect it and clean it up deliberately.`);
-              }
+              const returnedId = Number.isSafeInteger(draft?.id) ? draft.id : "unknown";
+              core.error(`Release failure for intended tag ${handoff.tag}; returned draft ID: ${returnedId}. Inspect remote state and clean up deliberately.`);
               throw error;
             }
