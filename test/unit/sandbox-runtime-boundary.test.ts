@@ -16,6 +16,134 @@ import {
 import { sandlotMktempShimDirectory } from "../../src/environment.js";
 
 describe("SandboxRuntimeBoundary", () => {
+  it("does not wrap an unrestricted staging config before successful initialization", async () => {
+    const transport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation) => operation === "wrap"
+        ? { argv: ["/bin/bash", "-c", "wrapped"], env: {} }
+        : undefined),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport: vi.fn(async () => transport),
+    });
+    const config: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    await boundary.updateConfig(config, "unrestricted");
+    await expect(boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace"))
+      .rejects.toThrow(/initialized/i);
+
+    expect(transport.request).not.toHaveBeenCalledWith("wrap", expect.anything(), undefined);
+    await boundary.reset();
+  });
+
+  it("does not wrap after filtered initialization fails", async () => {
+    const transport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation) => {
+        if (operation === "initialize") throw new Error("literal initialization failure");
+        if (operation === "wrap") return { argv: ["/bin/bash", "-c", "wrapped"], env: {} };
+        return undefined;
+      }),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport: vi.fn(async () => transport),
+    });
+    const config: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    await boundary.updateConfig(config, "filtered");
+    await expect(boundary.initialize(config, undefined, false, "filtered"))
+      .rejects.toThrow("literal initialization failure");
+    await expect(boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace"))
+      .rejects.toThrow(/initialized/i);
+
+    expect(transport.request).not.toHaveBeenCalledWith("wrap", expect.anything(), undefined);
+    await boundary.reset();
+  });
+
+  it("rejects config changes after validated initialization", async () => {
+    const transport: SandboxRuntimeTransport = {
+      request: vi.fn(async () => undefined),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport: vi.fn(async () => transport),
+    });
+    const filtered: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+    const unrestricted: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    await boundary.updateConfig(filtered, "filtered");
+    await boundary.initialize(filtered, undefined, false, "filtered");
+    await expect(boundary.updateConfig(unrestricted, "unrestricted")).rejects.toThrow(/initializ|mode/i);
+
+    await boundary.reset();
+  });
+
+  it("rejects config changes while initialization is pending", async () => {
+    const initialized = deferred();
+    const transport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation) => {
+        if (operation === "initialize") await initialized.promise;
+        return undefined;
+      }),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport: vi.fn(async () => transport),
+    });
+    const filtered: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+    const unrestricted: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    await boundary.updateConfig(filtered, "filtered");
+    const initialization = boundary.initialize(filtered, undefined, false, "filtered");
+    await expect(boundary.updateConfig(unrestricted, "unrestricted")).rejects.toThrow(/initializ|mode/i);
+
+    initialized.resolve();
+    await initialization;
+    await boundary.reset();
+  });
+
   it("sends the explicit effective network mode through IPC without inferring it from SRT config", async () => {
     const requests: Array<{ operation: string; payload: unknown }> = [];
     const transport: SandboxRuntimeTransport = {
@@ -120,6 +248,7 @@ describe("SandboxRuntimeBoundary", () => {
     });
 
     await boundary.open("/workspace");
+    await initializeBoundary(boundary);
     const descriptor = await boundary.wrapWithSandboxArgv(
       "printf ok",
       undefined,
@@ -171,8 +300,10 @@ describe("SandboxRuntimeBoundary", () => {
       hostEnvironment: {},
       createTransport: vi.fn(async () => transport),
     });
+    const config = { ripgrep: { command: "/trusted/rg" } };
     await boundary.open("/workspace");
-    await boundary.updateConfig({ ripgrep: { command: "/trusted/rg" } });
+    await boundary.updateConfig(config);
+    await boundary.initialize(config);
 
     await boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace");
 
@@ -212,6 +343,7 @@ describe("SandboxRuntimeBoundary", () => {
 
     await boundary.open("/workspace");
     await boundary.updateConfig(config);
+    await boundary.initialize(config);
     await boundary.wrapWithSandboxArgv("printf '%s' \"$MASKED_TOKEN\"", undefined, undefined, undefined, "/workspace", {
       childEnvironment: { MASKED_TOKEN: secret, SAFE_FLAG: "yes" },
     });
@@ -261,8 +393,10 @@ describe("SandboxRuntimeBoundary", () => {
       createTransport: vi.fn(async () => transport),
     });
 
+    const config = credentialConfig("MASKED_TOKEN", "mask");
     await boundary.open("/workspace");
-    await boundary.updateConfig(credentialConfig("MASKED_TOKEN", "mask"));
+    await boundary.updateConfig(config);
+    await boundary.initialize(config);
     const error = await boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace")
       .catch((reason: unknown) => reason);
 
@@ -289,8 +423,10 @@ describe("SandboxRuntimeBoundary", () => {
       hostEnvironment: { MASKED_TOKEN: secret },
       createTransport: vi.fn(async () => transport),
     });
+    const config = credentialConfig("MASKED_TOKEN", "mask");
     await boundary.open("/workspace");
-    await boundary.updateConfig(credentialConfig("MASKED_TOKEN", "mask"));
+    await boundary.updateConfig(config);
+    await boundary.initialize(config);
 
     const error = await boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace")
       .catch((reason: unknown) => reason);
@@ -1026,6 +1162,13 @@ function credentialConfig(name: string, mode: "deny" | "mask"): SandboxRuntimeCo
     filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
     credentials: { envVars: [{ name, mode }] },
   };
+}
+
+async function initializeBoundary(boundary: SandboxRuntimeBoundary): Promise<void> {
+  await boundary.initialize({
+    network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+    filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+  });
 }
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {

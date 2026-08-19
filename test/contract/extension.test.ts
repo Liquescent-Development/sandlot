@@ -172,6 +172,25 @@ describe("Sandlot extension contract", () => {
     );
   });
 
+  it("threads a trusted unrestricted effective mode into staging and initialization", async () => {
+    const harness = createHarness();
+    const unrestricted = {
+      ...harness.effective,
+      networkMode: "unrestricted" as const,
+      network: { ...harness.effective.network, allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+    };
+    harness.composePolicy.mockResolvedValue(unrestricted);
+    harness.extension(harness.pi.api);
+
+    await harness.pi.emit("session_start", { type: "session_start", reason: "startup" }, createContext().value);
+
+    expect(harness.manager.updateConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ network: expect.objectContaining({ strictAllowlist: false }) }),
+      "unrestricted",
+    );
+    expect(harness.manager.initialize).toHaveBeenCalledWith(expect.anything(), undefined, true, "unrestricted");
+  });
+
   it("closes an opened runtime boundary when preflight fails", async () => {
     const harness = createHarness();
     harness.manager.updateConfig.mockRejectedValueOnce(new Error("staging failed"));
@@ -304,7 +323,7 @@ describe("Sandlot extension contract", () => {
 
     expect(harness.manager.updateConfig).toHaveBeenCalledWith(expect.objectContaining({
       ripgrep: expect.objectContaining({ command: "/trusted/discovered-rg" }),
-    }));
+    }), "filtered");
     expect(harness.manager.checkDependenciesAsync).toHaveBeenCalledWith(expect.objectContaining({
       command: "/trusted/discovered-rg",
     }));
@@ -322,7 +341,7 @@ describe("Sandlot extension contract", () => {
         allowRead: expect.arrayContaining(["/trusted/apply-seccomp"]),
         denyWrite: expect.arrayContaining(["/trusted/apply-seccomp"]),
       }),
-    }));
+    }), "filtered");
   });
 
   it("does not load project policy when Pi has not trusted the project", async () => {

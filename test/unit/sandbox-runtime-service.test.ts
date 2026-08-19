@@ -59,6 +59,41 @@ describe("Sandbox Runtime service protocol", () => {
     expect(manager.initialize).not.toHaveBeenCalled();
   });
 
+  it("requires successful initialization before wrapping a validated unrestricted staging config", async () => {
+    const manager = serviceManager();
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "updateConfig", { config, networkMode: "unrestricted" });
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .rejects.toThrow(/initialized/i);
+
+    expect(manager.wrapWithSandboxArgv).not.toHaveBeenCalled();
+  });
+
+  it("rejects an update that changes the trusted mode after initialization", async () => {
+    const manager = serviceManager();
+    const filtered = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+    const unrestricted = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "updateConfig", { config: filtered, networkMode: "filtered" });
+    await handleSandboxRuntimeRequest(manager, "initialize", { config: filtered, networkMode: "filtered" });
+    await expect(handleSandboxRuntimeRequest(manager, "updateConfig", {
+      config: unrestricted,
+      networkMode: "unrestricted",
+    })).rejects.toThrow(/initializ|mode/i);
+
+    expect(manager.updateConfig).toHaveBeenCalledTimes(1);
+  });
+
   it("routes wrap ownership, cwd, cleanup, and command-scoped violations through SRT", async () => {
     const cwd = process.cwd();
     const violations = [{ line: "deny file-write /protected" }];
@@ -76,6 +111,8 @@ describe("Sandbox Runtime service protocol", () => {
       reset: vi.fn(async () => undefined),
     };
     const abort = new AbortController();
+
+    await initializeService(manager);
 
     const descriptor = await handleSandboxRuntimeRequest(manager, "wrap", {
       command: "inner command",
@@ -114,6 +151,8 @@ describe("Sandbox Runtime service protocol", () => {
       throw new Error("ripgrep scan failed with exit code 2");
     });
 
+    await initializeService(manager);
+
     await expect(handleSandboxRuntimeRequest(manager, "wrap", {
       command: "inner command",
       cwd: "/workspace",
@@ -150,6 +189,7 @@ describe("Sandbox Runtime service protocol", () => {
     };
 
     try {
+      await initializeService(manager);
       await Promise.all(invocationRoots.map((cwd, index) => handleSandboxRuntimeRequest(manager, "wrap", {
         command: `inner command ${index}`,
         cwd,
@@ -167,6 +207,8 @@ describe("Sandbox Runtime service protocol", () => {
     const manager = serviceManager();
     const inherited = Object.create({ command: "true", cwd: "/workspace" });
     const scanMandatoryDenyPaths = vi.fn(async () => undefined);
+
+    await initializeService(manager);
 
     await expect(handleSandboxRuntimeRequest(manager, "wrap", inherited)).rejects.toThrow(/own|plain|payload/i);
     await expect(handleSandboxRuntimeRequest(manager, "wrap", {
@@ -209,8 +251,10 @@ describe("Sandbox Runtime service protocol", () => {
     try {
       await handleSandboxRuntimeRequest(manager, "updateConfig", {
         config,
+        networkMode: "filtered",
         credentialEnvironment: { [name]: secret },
       });
+      await initializeService(manager, config, { [name]: secret });
       const descriptor = await handleSandboxRuntimeRequest(manager, "wrap", {
         command: "true",
         cwd: process.cwd(),
@@ -243,8 +287,10 @@ describe("Sandbox Runtime service protocol", () => {
       try {
         await handleSandboxRuntimeRequest(manager, "updateConfig", {
           config,
+          networkMode: "filtered",
           credentialEnvironment: { [name]: secret },
         });
+        await initializeService(manager, config, { [name]: secret });
         await expect(handleSandboxRuntimeRequest(manager, "wrap", {
           command: "true",
           cwd: process.cwd(),
@@ -282,8 +328,10 @@ describe("Sandbox Runtime service protocol", () => {
     };
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
       config,
+      networkMode: "filtered",
       credentialEnvironment: { TMPDIR: secret },
     });
+    await initializeService(manager, config, { TMPDIR: secret });
 
     await expect(handleSandboxRuntimeRequest(manager, "wrap", {
       command: "true",
@@ -300,10 +348,13 @@ describe("Sandbox Runtime service protocol", () => {
         env: { LEAK: secret },
       })),
     });
+    const config = credentialConfig(name);
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
-      config: credentialConfig(name),
+      config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
+    await initializeService(manager, config, { [name]: secret });
 
     const error = await handleSandboxRuntimeRequest(manager, "wrap", {
       command: "true",
@@ -321,8 +372,10 @@ describe("Sandbox Runtime service protocol", () => {
     const manager = serviceManager({
       checkDependenciesAsync: vi.fn(async () => ({ warnings: [secret], errors: [] })),
     });
+    const config = credentialConfig(name);
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
-      config: credentialConfig(name),
+      config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
 
@@ -350,6 +403,7 @@ describe("Sandbox Runtime service protocol", () => {
     };
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
       config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
 
@@ -386,6 +440,7 @@ describe("Sandbox Runtime service protocol", () => {
     };
     await handleSandboxRuntimeRequest(manager, "updateConfig", {
       config,
+      networkMode: "filtered",
       credentialEnvironment: { [name]: secret },
     });
 
@@ -431,6 +486,7 @@ describe("Sandbox Runtime service protocol", () => {
         return new Promise<never>(() => undefined);
       }),
     });
+    await initializeService(manager);
     const request = handleSandboxRuntimeRequest(manager, "wrap", {
       command: "true",
       cwd: process.cwd(),
@@ -519,4 +575,19 @@ function credentialConfig(name: string) {
       envVars: [{ name, mode: "mask" as const }],
     },
   };
+}
+
+async function initializeService(
+  manager: ReturnType<typeof serviceManager>,
+  config = {
+    network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+    filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+  },
+  credentialEnvironment: NodeJS.ProcessEnv = {},
+): Promise<void> {
+  await handleSandboxRuntimeRequest(manager, "initialize", {
+    config,
+    networkMode: "filtered",
+    credentialEnvironment,
+  });
 }

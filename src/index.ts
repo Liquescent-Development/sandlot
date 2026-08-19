@@ -46,7 +46,7 @@ export { resolveExtensionTrustPaths } from "./trust.js";
 
 interface ExtensionSandboxManager extends SandboxManagerLike {
   open(cwd: string): Promise<void>;
-  updateConfig(config: SandboxRuntimeConfig): Promise<void>;
+  updateConfig(config: SandboxRuntimeConfig, networkMode?: EffectivePolicy["networkMode"]): Promise<void>;
   getLinuxGlobPatternWarnings(): Promise<string[]>;
   checkDependenciesAsync(ripgrepConfig?: { command: string; args?: string[] }): Promise<SandboxDependencyCheck>;
   initialize(
@@ -186,7 +186,7 @@ export function createSandlotExtension(dependencies: ExtensionDependencies) {
         await dependencies.manager.open(ctx.cwd);
         // Sandbox Runtime 0.0.73 reads non-rg dependency paths from its
         // process-global config even in the explicit preflight API.
-        await dependencies.manager.updateConfig(config);
+        await dependencies.manager.updateConfig(config, policy.networkMode);
         if (dependencies.platform === "linux") {
           const globWarnings = await dependencies.manager.getLinuxGlobPatternWarnings();
           if (globWarnings.length > 0) {
