@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const workerPath = resolve("dist/helpers/search-worker.js");
 const fileWorkerPath = resolve("dist/helpers/file-worker.js");
 const WORKER_PROCESS_TIMEOUT_MS = 15_000;
-const WORKER_TEST_TIMEOUT_MS = WORKER_PROCESS_TIMEOUT_MS + 5_000;
+const WORKER_TEST_TIMEOUT_MS = WORKER_PROCESS_TIMEOUT_MS * 2 + 10_000;
 let directory: string;
 let rgPath: string;
 
@@ -118,6 +118,30 @@ describe("search worker process", { timeout: WORKER_TEST_TIMEOUT_MS }, () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ version: 1, ok: false, error: { code: "RG_FAILED" } });
   });
 
+  it("terminates a timed-out worker's descendant process before it can keep mutating", async () => {
+    const marker = join(directory, "timed-out-descendant.txt");
+    const hangingEntry = join(directory, "hanging-worker.mjs");
+    await writeFile(hangingEntry, `import { spawn } from "node:child_process";
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
+  const { appendFileSync, writeFileSync } = require("node:fs");
+  const marker = process.argv[1];
+  writeFileSync(marker, "started\\n");
+  const heartbeat = setInterval(() => appendFileSync(marker, "beat\\n"), 50);
+  setTimeout(() => { clearInterval(heartbeat); process.exit(0); }, 3000);
+`)}, process.env.SANDLOT_FAKE_MARKER], { stdio: "ignore" });
+descendant.unref();
+setInterval(() => undefined, 1000);
+`);
+
+    await expect(runEntry(hangingEntry, "", { SANDLOT_FAKE_MARKER: marker }, 1_000))
+      .rejects.toThrow("search worker process timed out after 1000ms");
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    const afterTimeout = await readFile(marker, "utf8");
+    expect(afterTimeout).toMatch(/^started\n(?:beat\n)+$/);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    await expect(readFile(marker, "utf8")).resolves.toBe(afterTimeout);
+  });
+
   it("rejects file/search worker requests at the wrong fixed worker entry point", async () => {
     const search = await runRaw(JSON.stringify({ version: 1, operation: "read", path: join(directory, "src", "a.ts") }));
     expect(search.exitCode).not.toBe(0);
@@ -139,17 +163,25 @@ function runRaw(stdin: string, environment: NodeJS.ProcessEnv = {}): Promise<{ e
   return runEntry(workerPath, stdin, environment);
 }
 
-function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv = {}, timeoutMs = WORKER_PROCESS_TIMEOUT_MS): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   return new Promise((resolveResult, reject) => {
-    const child = spawn(process.execPath, [entry], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env.PATH, SANDLOT_SEARCH_RG_PATH: rgPath, ...environment } });
+    const child = spawn(process.execPath, [entry], {
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { PATH: process.env.PATH, SANDLOT_SEARCH_RG_PATH: rgPath, ...environment },
+    });
+    const processGroupId = child.pid;
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let timedOut = false;
     let settled = false;
+    let spawned = false;
+    let childError: Error | undefined;
+    let terminationError: Error | undefined;
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
-    }, WORKER_PROCESS_TIMEOUT_MS);
+      terminationError = terminateOwnedProcessGroup(child, processGroupId);
+    }, timeoutMs);
     const settle = (callback: () => void): void => {
       if (settled) return;
       settled = true;
@@ -158,16 +190,58 @@ function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv =
     };
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", (error) => settle(() => reject(error)));
+    child.once("spawn", () => { spawned = true; });
+    child.on("error", (error) => {
+      if (!spawned) {
+        settle(() => reject(error));
+        return;
+      }
+      childError ??= error;
+    });
     child.on("close", (exitCode) => settle(() => {
       if (timedOut) {
-        reject(new Error(`search worker process timed out after ${WORKER_PROCESS_TIMEOUT_MS}ms`));
+        const detail = terminationError === undefined ? "" : `; ${terminationError.message}`;
+        reject(new Error(`search worker process timed out after ${timeoutMs}ms${detail}`));
+        return;
+      }
+      if (childError !== undefined) {
+        reject(childError);
         return;
       }
       resolveResult({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
     }));
     child.stdin.end(stdin);
   });
+}
+
+function terminateOwnedProcessGroup(child: ReturnType<typeof spawn>, processGroupId: number | undefined): Error | undefined {
+  if (processGroupId === undefined || !Number.isSafeInteger(processGroupId) || processGroupId <= 0 || processGroupId === process.pid) {
+    const fallbackError = terminateDirectChild(child);
+    const detail = fallbackError === undefined ? "" : `; ${fallbackError.message}`;
+    return new Error(`search worker did not expose a safe owned process-group id${detail}`);
+  }
+  try {
+    process.kill(-processGroupId, "SIGKILL");
+    return undefined;
+  } catch (error) {
+    const fallbackError = terminateDirectChild(child);
+    if (isErrno(error, "ESRCH") && fallbackError === undefined) return undefined;
+    const detail = fallbackError === undefined ? "" : `; ${fallbackError.message}`;
+    return new Error(`failed to terminate search worker process group: ${error instanceof Error ? error.message : String(error)}${detail}`);
+  }
+}
+
+function terminateDirectChild(child: ReturnType<typeof spawn>): Error | undefined {
+  try {
+    if (child.kill("SIGKILL") || child.exitCode !== null || child.signalCode !== null) return undefined;
+    return new Error("direct worker termination was not delivered");
+  } catch (error) {
+    return new Error(`direct worker termination failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 async function runFakeWorker(mode: string, request: unknown, environment: NodeJS.ProcessEnv = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
