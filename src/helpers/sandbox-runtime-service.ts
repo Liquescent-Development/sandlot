@@ -41,6 +41,7 @@ interface ServiceManager {
 }
 
 interface ServiceSessionState {
+  lifecycleGeneration: number;
   credentialEnvironment: NodeJS.ProcessEnv;
   config: SandboxRuntimeConfig | undefined;
   stagedNetworkMode: NetworkMode | undefined;
@@ -55,6 +56,7 @@ function serviceState(manager: ServiceManager): ServiceSessionState {
   let state = serviceStates.get(manager);
   if (state === undefined) {
     state = {
+      lifecycleGeneration: 0,
       credentialEnvironment: Object.create(null) as NodeJS.ProcessEnv,
       config: undefined,
       stagedNetworkMode: undefined,
@@ -215,6 +217,7 @@ async function dispatchSandboxRuntimeRequest(
       if (record.enableLogMonitor !== undefined && typeof record.enableLogMonitor !== "boolean") {
         throw new Error("Sandbox Runtime service enableLogMonitor must be boolean");
       }
+      const initializationGeneration = state.lifecycleGeneration;
       state.initializingNetworkMode = networkMode;
       try {
         await manager.initialize(
@@ -222,12 +225,17 @@ async function dispatchSandboxRuntimeRequest(
           networkMode === "unrestricted" ? allowAllNetwork : undefined,
           record.enableLogMonitor === true,
         );
+        if (state.lifecycleGeneration !== initializationGeneration) {
+          throw new Error("Sandbox Runtime service initialization was cancelled by reset");
+        }
         state.credentialEnvironment = credentialEnvironment;
         state.config = config;
         state.stagedNetworkMode = networkMode;
         state.initializedNetworkMode = networkMode;
       } finally {
-        state.initializingNetworkMode = undefined;
+        if (state.lifecycleGeneration === initializationGeneration) {
+          state.initializingNetworkMode = undefined;
+        }
       }
       return undefined;
     }
@@ -296,16 +304,16 @@ async function dispatchSandboxRuntimeRequest(
     case "reset":
       requireNoPayload(payload, operation);
       const resetCredentialEnvironment = state.credentialEnvironment;
+      state.lifecycleGeneration++;
+      state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
+      state.config = undefined;
+      state.stagedNetworkMode = undefined;
+      state.initializingNetworkMode = undefined;
+      state.initializedNetworkMode = undefined;
       try {
         await manager.reset();
       } catch (error: unknown) {
         throw redactCredentialError(error, resetCredentialEnvironment);
-      } finally {
-        state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
-        state.config = undefined;
-        state.stagedNetworkMode = undefined;
-        state.initializingNetworkMode = undefined;
-        state.initializedNetworkMode = undefined;
       }
       return undefined;
   }
@@ -518,6 +526,7 @@ function startService(manager: ServiceManager): void {
     for (const controller of active.values()) controller.abort();
     active.clear();
     const state = serviceState(manager);
+    state.lifecycleGeneration++;
     state.credentialEnvironment = Object.create(null) as NodeJS.ProcessEnv;
     state.config = undefined;
     state.stagedNetworkMode = undefined;

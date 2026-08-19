@@ -94,6 +94,29 @@ describe("Sandbox Runtime service protocol", () => {
     expect(manager.updateConfig).toHaveBeenCalledTimes(1);
   });
 
+  it("does not restore initialized state when reset overtakes initialization", async () => {
+    const initialized = deferred();
+    const manager = serviceManager({
+      initialize: vi.fn(async () => { await initialized.promise; }),
+    });
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    const initialization = handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+    });
+    await handleSandboxRuntimeRequest(manager, "reset");
+    initialized.resolve();
+
+    await expect(initialization).rejects.toThrow(/reset|cancel/i);
+    await expect(handleSandboxRuntimeRequest(manager, "wrap", { command: "true", cwd: process.cwd() }))
+      .rejects.toThrow(/initialized/i);
+    expect(manager.wrapWithSandboxArgv).not.toHaveBeenCalled();
+  });
+
   it("routes wrap ownership, cwd, cleanup, and command-scoped violations through SRT", async () => {
     const cwd = process.cwd();
     const violations = [{ line: "deny file-write /protected" }];
@@ -564,6 +587,12 @@ function serviceManager(overrides: Record<string, unknown> = {}) {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => { resolve = settle; });
+  return { promise, resolve };
 }
 
 function credentialConfig(name: string) {

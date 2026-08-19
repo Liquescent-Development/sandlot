@@ -112,6 +112,7 @@ export class SandboxRuntimeBoundary {
   #serviceTerminationRequiredGeneration = 0;
   #serviceTerminationConfirmedGeneration = 0;
   #resetAttempt: Promise<void> | undefined;
+  #lifecycleGeneration = 0;
   #cwd: string | undefined;
   #ripgrepCommand: string | undefined;
   #stagedNetworkMode: NetworkMode | undefined;
@@ -246,6 +247,7 @@ export class SandboxRuntimeBoundary {
       throw new Error("Sandbox Runtime boundary initialization network mode does not match staged config");
     }
     const credentialEnvironment = buildCredentialEnvironment(config, this.#hostEnvironment);
+    const initializationGeneration = this.#lifecycleGeneration;
     this.#initializingNetworkMode = networkMode;
     try {
       await this.request(
@@ -259,11 +261,16 @@ export class SandboxRuntimeBoundary {
         undefined,
         credentialValues(credentialEnvironment),
       );
+      if (this.#lifecycleGeneration !== initializationGeneration) {
+        throw new Error("Sandbox Runtime boundary initialization was cancelled by reset");
+      }
       this.#stagedNetworkMode = networkMode;
       this.#initializedNetworkMode = networkMode;
       this.bindCredentialPolicy(config, credentialEnvironment);
     } finally {
-      this.#initializingNetworkMode = undefined;
+      if (this.#lifecycleGeneration === initializationGeneration) {
+        this.#initializingNetworkMode = undefined;
+      }
     }
   }
 
@@ -361,6 +368,7 @@ export class SandboxRuntimeBoundary {
     const activeService = service?.active === true ? service : undefined;
     // Detach atomically while retaining the exact transport in #service.
     if (activeService !== undefined) activeService.active = false;
+    this.#lifecycleGeneration++;
     this.#cwd = undefined;
     this.#ripgrepCommand = undefined;
     this.#stagedNetworkMode = undefined;

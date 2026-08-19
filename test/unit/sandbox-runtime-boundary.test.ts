@@ -144,6 +144,39 @@ describe("SandboxRuntimeBoundary", () => {
     await boundary.reset();
   });
 
+  it("does not restore initialized state when reset overtakes initialization", async () => {
+    const initialized = deferred();
+    const transport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation) => {
+        if (operation === "initialize") await initialized.promise;
+        return undefined;
+      }),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport: vi.fn(async () => transport),
+    });
+    const config: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    const initialization = boundary.initialize(config, undefined, false, "filtered");
+    await boundary.reset();
+    initialized.resolve();
+
+    await expect(initialization).rejects.toThrow(/reset|cancel/i);
+    await expect(boundary.wrapWithSandboxArgv("true", undefined, undefined, undefined, "/workspace"))
+      .rejects.toThrow(/initialized/i);
+    expect(transport.request).not.toHaveBeenCalledWith("wrap", expect.anything(), undefined);
+  });
+
   it("sends the explicit effective network mode through IPC without inferring it from SRT config", async () => {
     const requests: Array<{ operation: string; payload: unknown }> = [];
     const transport: SandboxRuntimeTransport = {
