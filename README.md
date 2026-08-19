@@ -29,10 +29,12 @@ Prerequisites:
 Install the pinned release:
 
 ```bash
-pi install git:github.com/Liquescent-Development/sandlot@v0.1.0
+pi install git:github.com/Liquescent-Development/sandlot@v0.2.0
 ```
 
 Launch Pi in a trusted project, then run `/sandlot`. A `🔒 Sandlot` footer and a snapshot containing `state: ready` confirm that the extension is ready. If initialization fails, protected operations remain blocked; correct the reported prerequisite or policy error and restart Pi. To update, explicitly install a newer reviewed tag with the same command; Sandlot does not silently move this pinned release.
+
+Policy files are optional. Put trusted user settings and the permission ceiling in `~/.pi/agent/sandlot.json`; put project-specific restrictions in `<project>/.pi/sandlot.json`. A project policy can only narrow the trusted user's policy, never widen it. See the [configuration guide](docs/configuration.md) for the complete schema, and run `/sandlot-reload` (or restart Pi) after changing either file.
 
 ### Secure defaults
 
@@ -72,7 +74,7 @@ Sandlot verifies and replaces Pi's `bash`, `read`, `write`, `edit`, `ls`, `find`
 
 ## Supported platforms
 
-Sandlot 0.1 supports macOS on x64 and arm64. Linux/Bubblewrap support is deferred and unverified for this release; do not treat source-level Linux paths as a supported security boundary. Windows is unsupported.
+Sandlot 0.2 supports macOS on x64 and arm64. Linux/Bubblewrap support is deferred and unverified for this release; do not treat source-level Linux paths as a supported security boundary. Windows is unsupported.
 
 ## Documentation
 

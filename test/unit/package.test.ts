@@ -7,6 +7,10 @@ import { describe, expect, it } from "vitest";
 describe("package metadata", () => {
   it("pins the security boundary and publishes the compiled Pi entry", async () => {
     const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+    const lock = JSON.parse(await readFile(new URL("../../package-lock.json", import.meta.url), "utf8"));
+    expect(pkg.version).toBe("0.2.0");
+    expect(lock.version).toBe("0.2.0");
+    expect(lock.packages[""].version).toBe("0.2.0");
     expect(pkg.engines.node).toBe(">=22.19.0");
     expect(pkg.dependencies["@anthropic-ai/sandbox-runtime"]).toBe("0.0.73");
     expect(pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBeUndefined();

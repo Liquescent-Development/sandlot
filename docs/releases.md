@@ -1,6 +1,6 @@
 # Releases
 
-Sandlot publishes stable versions as immutable GitHub Releases. A stable installation is always pinned to an exact reviewed tag such as `v0.1.0`; Sandlot does not publish the unrelated `sandlot` package on npmjs.org.
+Sandlot publishes stable versions as immutable GitHub Releases. A stable installation is always pinned to an exact reviewed tag such as `v0.2.0`; Sandlot does not publish the unrelated `sandlot` package on npmjs.org.
 
 ## Release contract
 
@@ -37,7 +37,7 @@ The second command must print `true`. Do not dispatch a release until it does.
 4. Dispatch the workflow from `main`, substituting the reviewed version without a leading `v`:
 
    ```bash
-   gh workflow run release.yml --repo Liquescent-Development/sandlot --ref main -f version=0.1.0
+   gh workflow run release.yml --repo Liquescent-Development/sandlot --ref main -f version=0.2.0
    ```
 
 5. Resolve the new run and watch both `verify` and `publish` to completion:
@@ -57,8 +57,8 @@ A publication failure may leave the atomically claimed tag, a draft, or both. Th
 
 ```bash
 gh run view RUN_ID --repo Liquescent-Development/sandlot --log-failed
-gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate repos/Liquescent-Development/sandlot/releases --jq '.[] | select(.tag_name == "v0.1.0") | {id,tag_name,draft,immutable,assets:[.assets[].name]}'
-gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/git/ref/tags/v0.1.0
+gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate repos/Liquescent-Development/sandlot/releases --jq '.[] | select(.tag_name == "v0.2.0") | {id,tag_name,draft,immutable,assets:[.assets[].name]}'
+gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/git/ref/tags/v0.2.0
 ```
 
 A missing tag returns `404`. If the tag exists, its object SHA must equal the exact verified green `main` commit; a different SHA is a collision and must not be changed by this recovery process. If a draft exists, compare its recorded ID, target, notes, and assets with the verified run.
@@ -67,7 +67,7 @@ Only when no published release exists for the tag, the recorded release is still
 
 ```bash
 gh api --method DELETE -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/releases/RELEASE_ID
-gh api --method DELETE -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/git/refs/tags/v0.1.0
+gh api --method DELETE -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/git/refs/tags/v0.2.0
 ```
 
 Omit the draft deletion command when no draft was created. Never move any tag. Never delete a published release or its tag; published immutable tags remain permanent release identities. Never retry blindly when a published release exists or when remote state differs from the failed run. If publication succeeded but the final immutable assertion failed, stop and investigate the repository setting and returned release state rather than modifying remote state.
@@ -77,19 +77,19 @@ Omit the draft deletion command when no draft was created. Never move any tag. N
 Require the release to be public, non-prerelease, immutable, and targeted at the green `main` commit:
 
 ```bash
-gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/releases/tags/v0.1.0 --jq '{tag_name,target_commitish,draft,prerelease,immutable,assets:[.assets[]|{name,state,size,digest}]}'
-gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/git/ref/tags/v0.1.0 --jq '.object.sha'
-gh release verify v0.1.0 --repo Liquescent-Development/sandlot
+gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/releases/tags/v0.2.0 --jq '{tag_name,target_commitish,draft,prerelease,immutable,assets:[.assets[]|{name,state,size,digest}]}'
+gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/Liquescent-Development/sandlot/git/ref/tags/v0.2.0 --jq '.object.sha'
+gh release verify v0.2.0 --repo Liquescent-Development/sandlot
 ```
 
 Download the two assets to a new empty directory and verify the checksum:
 
 ```bash
-gh release download v0.1.0 --repo Liquescent-Development/sandlot --pattern 'sandlot-0.1.0.tgz*' --dir ./sandlot-release-check
+gh release download v0.2.0 --repo Liquescent-Development/sandlot --pattern 'sandlot-0.2.0.tgz*' --dir ./sandlot-release-check
 cd ./sandlot-release-check
-shasum -a 256 -c sandlot-0.1.0.tgz.sha256
-gh release verify-asset v0.1.0 sandlot-0.1.0.tgz --repo Liquescent-Development/sandlot
-gh release verify-asset v0.1.0 sandlot-0.1.0.tgz.sha256 --repo Liquescent-Development/sandlot
+shasum -a 256 -c sandlot-0.2.0.tgz.sha256
+gh release verify-asset v0.2.0 sandlot-0.2.0.tgz --repo Liquescent-Development/sandlot
+gh release verify-asset v0.2.0 sandlot-0.2.0.tgz.sha256 --repo Liquescent-Development/sandlot
 ```
 
 An immutable release automatically carries GitHub's release attestation. `gh release verify` verifies the immutable release, and `gh release verify-asset` cryptographically verifies each downloaded asset against that attestation. The release notes must exactly match the curated `CHANGELOG.md` section for that version. Both assets must report `state: uploaded`; their names, sizes, and exact GitHub `sha256:` digests must agree with the downloaded files.
@@ -99,7 +99,7 @@ An immutable release automatically carries GitHub's release attestation. `gh rel
 Install a reviewed stable tag explicitly:
 
 ```bash
-pi install git:github.com/Liquescent-Development/sandlot@v0.1.0
+pi install git:github.com/Liquescent-Development/sandlot@v0.2.0
 pi list
 ```
 

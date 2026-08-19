@@ -4,6 +4,8 @@ All notable changes to Sandlot are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-19
+
 ### Added
 
 - Trusted-user-only `network.mode: "unrestricted"` for outbound host/domain filtering exceptions, with explicit diagnostics, policy validation, masked-credential sentinels, and macOS enforcement coverage.

@@ -22,8 +22,15 @@ describe("public documentation", () => {
 
     expect(readme).toContain("docs/assets/sandlot-logo.png");
     expect(readme).toContain("anthropic-experimental/sandbox-runtime");
-    expect(readme).toContain("pi install git:github.com/Liquescent-Development/sandlot@v0.1.0");
+    expect(readme).toContain("pi install git:github.com/Liquescent-Development/sandlot@v0.2.0");
     expect(readme.indexOf("## Quick start")).toBeLessThan(readme.indexOf("## How it works"));
+    const quickStart = readme.slice(readme.indexOf("## Quick start"), readme.indexOf("### Secure defaults"));
+    expect(quickStart).toContain("~/.pi/agent/sandlot.json");
+    expect(quickStart).toContain("<project>/.pi/sandlot.json");
+    expect(quickStart).toMatch(/trusted user[\s\S]*(?:ceiling|maximum)/i);
+    expect(quickStart).toMatch(/project[\s\S]*(?:narrow|restrict)/i);
+    expect(quickStart).toContain("docs/configuration.md");
+    expect(quickStart).toContain("/sandlot-reload");
     expect(readme).toContain("macOS");
     expect(readme).toMatch(/Linux[\s\S]*(deferred|unsupported)/i);
     expect(readme).toMatch(/not a whole-Pi sandbox/i);
@@ -108,6 +115,7 @@ describe("public documentation", () => {
 
     const changelog = await read("CHANGELOG.md");
     expect(changelog).toMatch(/^## \[Unreleased\]$/m);
+    expect(changelog).toMatch(/^## \[0\.2\.0\] - 2026-08-19$/m);
     expect(changelog).toMatch(/^## \[0\.1\.0\] - 2026-08-\d{2}$/m);
   });
 
