@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const workerPath = resolve("dist/helpers/search-worker.js");
 const fileWorkerPath = resolve("dist/helpers/file-worker.js");
+const WORKER_PROCESS_TIMEOUT_MS = 15_000;
+const WORKER_TEST_TIMEOUT_MS = WORKER_PROCESS_TIMEOUT_MS + 5_000;
 let directory: string;
 let rgPath: string;
 
@@ -28,7 +30,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await rm(directory, { recursive: true, force: true }); });
 
-describe("search worker process", () => {
+describe("search worker process", { timeout: WORKER_TEST_TIMEOUT_MS }, () => {
   it("finds hidden TypeScript files, honors gitignore and explicit ignores, sorts relative POSIX paths, and detects a limit", async () => {
     const result = await runWorker({ version: 1, operation: "find", cwd: directory, pattern: "*.ts", ignore: ["src/b.ts"], limit: 1 });
     expect(result).toEqual({ version: 1, ok: true, value: { paths: [".hidden.ts"], limitReached: true } });
@@ -142,10 +144,28 @@ function runEntry(entry: string, stdin: string, environment: NodeJS.ProcessEnv =
     const child = spawn(process.execPath, [entry], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env.PATH, SANDLOT_SEARCH_RG_PATH: rgPath, ...environment } });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, WORKER_PROCESS_TIMEOUT_MS);
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", reject);
-    child.on("close", (exitCode) => resolveResult({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") }));
+    child.on("error", (error) => settle(() => reject(error)));
+    child.on("close", (exitCode) => settle(() => {
+      if (timedOut) {
+        reject(new Error(`search worker process timed out after ${WORKER_PROCESS_TIMEOUT_MS}ms`));
+        return;
+      }
+      resolveResult({ exitCode, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+    }));
     child.stdin.end(stdin);
   });
 }
