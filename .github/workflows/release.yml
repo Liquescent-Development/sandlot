@@ -339,6 +339,21 @@ jobs:
               ) throw new Error("GitHub returned an invalid claimed release tag");
               await requireClaimedTag();
             }
+            function requireExactDraftReleaseData(release) {
+              const uploadUrl = Number.isSafeInteger(release?.id)
+                ? `https://uploads.github.com/repos/${owner}/${repo}/releases/${release.id}/assets{?name,label}`
+                : undefined;
+              if (
+                !Number.isSafeInteger(release?.id) || release.id < 1
+                || release.draft !== true || release.tag_name !== handoff.tag
+                || release.target_commitish !== handoff.commit
+                || release.name !== handoff.tag || release.body !== releaseNotes
+                || release.prerelease !== false || release.upload_url !== uploadUrl
+              ) {
+                throw new Error("GitHub returned an invalid draft release");
+              }
+              return release;
+            }
             async function createDraftRelease() {
               const response = await github.request("POST /repos/{owner}/{repo}/releases", {
                 owner, repo,
@@ -351,18 +366,14 @@ jobs:
                 headers,
               });
               if (Number.isSafeInteger(response.data?.id)) draft = { id: response.data.id };
-              const uploadUrl = Number.isSafeInteger(response.data?.id)
-                ? `https://uploads.github.com/repos/${owner}/${repo}/releases/${response.data.id}/assets{?name,label}`
-                : undefined;
-              if (
-                !Number.isSafeInteger(response.data?.id) || response.data.id < 1
-                || response.data.draft !== true || response.data.tag_name !== handoff.tag
-                || response.data.target_commitish !== handoff.commit
-                || response.data.upload_url !== uploadUrl
-              ) {
-                throw new Error("GitHub returned an invalid draft release");
-              }
-              return response.data;
+              return requireExactDraftReleaseData(response.data);
+            }
+            async function requireExactDraftRelease() {
+              const response = await github.request("GET /repos/{owner}/{repo}/releases/{release_id}", {
+                owner, repo, release_id: draft.id, headers,
+              });
+              const release = requireExactDraftReleaseData(response.data);
+              if (release.id !== draft.id) throw new Error("GitHub returned an invalid draft release");
             }
             async function listAssets(releaseId) {
               const assets = await github.paginate("GET /repos/{owner}/{repo}/releases/{release_id}/assets", {
@@ -449,6 +460,7 @@ jobs:
               draft = await createDraftRelease();
               await uploadAndVerifyReleaseAssets();
               await requireClaimedTag();
+              await requireExactDraftRelease();
               await publishDraftRelease();
               await assertImmutablePublicRelease();
             } catch (error) {

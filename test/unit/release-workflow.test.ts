@@ -27,6 +27,7 @@ const orderedStages = [
   "await claimReleaseTag();",
   "draft = await createDraftRelease();",
   "await uploadAndVerifyReleaseAssets();",
+  "await requireExactDraftRelease();",
   "await publishDraftRelease();",
   "await assertImmutablePublicRelease();",
 ] as const;
@@ -199,7 +200,14 @@ describe("stable release workflow", () => {
       const published = harness.events.indexOf("publish-draft");
       expect(assetsVerified).toBeLessThan(published);
       expect(harness.events.slice(assetsVerified + 1, published)).toContain("verify-tag");
-      expect(harness.events.at(-1)).toBe("verify-tag");
+      expect(harness.events.slice(assetsVerified + 1, published)).toContain("get-draft");
+      expect(harness.events[published - 1]).toBe("get-draft");
+      const publicRelease = harness.events.indexOf("get-public-release");
+      const finalAssets = harness.events.indexOf("list-assets", publicRelease);
+      const finalTag = harness.events.indexOf("verify-tag", finalAssets);
+      expect(publicRelease).toBeLessThan(finalAssets);
+      expect(finalAssets).toBeLessThan(finalTag);
+      expect(finalTag).toBe(harness.events.length - 1);
     } finally {
       await harness.cleanup();
     }
@@ -231,6 +239,53 @@ describe("stable release workflow", () => {
       await expect(harness.execute()).rejects.toThrow(/release asset/i);
       expect(harness.state.published).toBe(false);
       expect(harness.state.assetPolls).toBeGreaterThan(1);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it.each([
+    "missing-name",
+    "wrong-name",
+    "missing-body",
+    "wrong-body",
+    "missing-prerelease",
+    "wrong-prerelease",
+  ] as const)("rejects a draft creation response with %s", async (draft) => {
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const harness = await createPublicationHarness(workflow, { draft });
+    try {
+      await expect(harness.execute()).rejects.toThrow(/invalid draft release/i);
+      expect(harness.uploadRoutes).toEqual([]);
+      expect(harness.state.published).toBe(false);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("re-fetches and validates the exact draft immediately before publication", async () => {
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const harness = await createPublicationHarness(workflow, { draftRefetch: "wrong-body" });
+    try {
+      await expect(harness.execute()).rejects.toThrow(/invalid draft release/i);
+      expect(harness.state.published).toBe(false);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it.each([
+    ["removed asset", "removed" as const],
+    ["missing digest", { digest: "missing" as const }],
+    ["null digest", { digest: "null" as const }],
+    ["wrong digest", { digest: "wrong" as const }],
+    ["non-uploaded state", { state: "starter" as const }],
+  ])("fails immutable verification when a public release has %s", async (_condition, publicAsset) => {
+    const workflow = await readFile(WORKFLOW_URL, "utf8");
+    const harness = await createPublicationHarness(workflow, { publicAsset });
+    try {
+      await expect(harness.execute()).rejects.toThrow(/release (?:asset|has)/i);
+      expect(harness.state.published).toBe(true);
     } finally {
       await harness.cleanup();
     }
@@ -389,9 +444,23 @@ type AssetFault = {
   state?: "uploaded" | "starter";
 };
 
+type DraftFault =
+  | "missing-name"
+  | "wrong-name"
+  | "missing-body"
+  | "wrong-body"
+  | "missing-prerelease"
+  | "wrong-prerelease";
+
 async function createPublicationHarness(
   workflow: string,
-  options: { tagClaimRace?: boolean; asset?: AssetFault } = {},
+  options: {
+    tagClaimRace?: boolean;
+    asset?: AssetFault;
+    draft?: DraftFault;
+    draftRefetch?: DraftFault;
+    publicAsset?: AssetFault | "removed";
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "sandlot-release-state-machine-"));
   const owner = "Liquescent-Development";
@@ -410,6 +479,25 @@ async function createPublicationHarness(
   const uploadRoutes: string[] = [];
   const assets: Array<Record<string, unknown>> = [];
   const state = { claimed: false, draftCreated: false, published: false, assetPolls: 0 };
+  const draftResponse = (fault?: DraftFault): Record<string, unknown> => {
+    const response: Record<string, unknown> = {
+      id: 71,
+      draft: true,
+      tag_name: tag,
+      target_commitish: commit,
+      name: tag,
+      body: "Release notes.\n",
+      prerelease: false,
+      upload_url: uploadUrl,
+    };
+    if (fault === "missing-name") delete response.name;
+    if (fault === "wrong-name") response.name = "wrong-name";
+    if (fault === "missing-body") delete response.body;
+    if (fault === "wrong-body") response.body = "wrong body\n";
+    if (fault === "missing-prerelease") delete response.prerelease;
+    if (fault === "wrong-prerelease") response.prerelease = true;
+    return response;
+  };
 
   await Promise.all([
     mkdir(join(root, "artifact"), { mode: 0o700 }),
@@ -437,7 +525,16 @@ async function createPublicationHarness(
       if (route === "GET /repos/{owner}/{repo}/releases/{release_id}/assets") {
         events.push("list-assets");
         state.assetPolls += 1;
-        return assets.map((asset) => ({ ...asset }));
+        const listed = assets.map((asset) => ({ ...asset }));
+        if (!state.published || options.publicAsset === undefined) return listed;
+        if (options.publicAsset === "removed") return listed.slice(0, 1);
+        const fault = options.publicAsset;
+        const corrupted = listed[0]!;
+        if (fault.state !== undefined) corrupted.state = fault.state;
+        if (fault.digest === "missing") delete corrupted.digest;
+        if (fault.digest === "null") corrupted.digest = null;
+        if (fault.digest === "wrong") corrupted.digest = `sha256:${"b".repeat(64)}`;
+        return listed;
       }
       throw new Error(`unexpected pagination: ${route}`);
     },
@@ -466,7 +563,11 @@ async function createPublicationHarness(
       if (route === "POST /repos/{owner}/{repo}/releases") {
         events.push("create-draft");
         state.draftCreated = true;
-        return { data: { id: 71, draft: true, tag_name: tag, target_commitish: commit, upload_url: uploadUrl } };
+        return { data: draftResponse(options.draft) };
+      }
+      if (route === "GET /repos/{owner}/{repo}/releases/{release_id}") {
+        events.push("get-draft");
+        return { data: draftResponse(options.draftRefetch) };
       }
       if (
         route === fullUploadRoute
