@@ -87,9 +87,11 @@ async function main(args = process.argv.slice(2)) {
       lockfile,
       changelog,
     });
-    validateOutputDescriptor(options.notesFd);
-    validateOutputDescriptor(options.metadataFd);
-    if (options.notesFd === options.metadataFd) throw new Error("release output descriptors must differ");
+    const notesInfo = validateOutputDescriptor(options.notesFd);
+    const metadataInfo = validateOutputDescriptor(options.metadataFd);
+    if (notesInfo.dev === metadataInfo.dev && notesInfo.ino === metadataInfo.ino) {
+      throw new Error("release output descriptors must reference distinct files");
+    }
     writeOutputs(
       options.notesFd,
       options.metadataFd,
@@ -145,7 +147,9 @@ function parseNotesFile(requestedPath) {
 }
 
 function validateOutputDescriptor(descriptor) {
-  if (!fstatSync(descriptor).isFile()) throw new Error("release output descriptor is not a regular file");
+  const info = fstatSync(descriptor);
+  if (!info.isFile()) throw new Error("release output descriptor is not a regular file");
+  return info;
 }
 
 function writeOutputs(notesFd, metadataFd, notes, metadata) {

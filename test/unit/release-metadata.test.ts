@@ -164,6 +164,23 @@ describe("release metadata", () => {
     }
   });
 
+  it("rejects distinct descriptor numbers that reference the same output file", async () => {
+    // Comparing only descriptor numbers would let metadata overwrite or mix with release notes in one file.
+    const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
+    try {
+      await writeFixture(root);
+      const shared = join(root, "shared-output.md");
+      const notes = await open(shared, "wx", 0o600);
+      const metadata = await open(shared, "r+");
+      const result = await runCliWithDescriptors(root, "0.1.0", notes.fd, metadata.fd);
+      expect(result.status).toBe(1);
+      expect(await readFile(shared, "utf8")).toBe("");
+      await Promise.all([notes.close(), metadata.close()]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not disclose a filesystem path when rejecting invalid output descriptor arguments", async () => {
     // Forwarding descriptor errors would expose a runner path through release-validation diagnostics.
     const root = await mkdtemp(join(tmpdir(), "sandlot-release-metadata-"));
