@@ -1,0 +1,470 @@
+name: Stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version to release (MAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release inputs and artifact
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22.19.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          package-manager-cache: false
+
+      - name: Install macOS sandbox prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ripgrep
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Generate validated release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          release_root="$RUNNER_TEMP/sandlot-release"
+          metadata_dir="$release_root/metadata"
+          notes_path="$metadata_dir/release-notes.md"
+          metadata_path="$metadata_dir/release-metadata.json"
+
+          if [[ -e "$release_root" || -L "$release_root" ]]; then
+            echo "release staging root already exists" >&2
+            exit 1
+          fi
+
+          mkdir -m 700 "$release_root"
+          mkdir -m 700 "$metadata_dir"
+          cleanup_metadata() {
+            rm -f -- "$notes_path" "$metadata_path"
+            rmdir -- "$metadata_dir" "$release_root" 2>/dev/null || true
+          }
+          trap cleanup_metadata ERR INT TERM
+
+          set -o noclobber
+          : > "$notes_path"
+          : > "$metadata_path"
+          set +o noclobber
+          chmod 600 "$notes_path" "$metadata_path"
+          [[ -f "$notes_path" && ! -L "$notes_path" ]]
+          [[ -f "$metadata_path" && ! -L "$metadata_path" ]]
+
+          exec 8<>"$notes_path"
+          exec 9<>"$metadata_path"
+          node scripts/release-metadata.mjs \
+            --version "$RELEASE_VERSION" \
+            --notes-fd 8 \
+            --metadata-fd 9 \
+            --notes-file release-notes.md
+          exec 8>&-
+          exec 9>&-
+
+          [[ -s "$notes_path" && -s "$metadata_path" ]]
+          [[ "$(stat -f '%Lp' "$notes_path")" == "600" ]]
+          [[ "$(stat -f '%Lp' "$metadata_path")" == "600" ]]
+          trap - ERR INT TERM
+
+      - name: Read-only remote preflight
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v8.0.0
+        env:
+          METADATA_PATH: ${{ runner.temp }}/sandlot-release/metadata/release-metadata.json
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("node:fs/promises");
+            const API_VERSION = "2026-03-10";
+            const headers = { "X-GitHub-Api-Version": API_VERSION };
+            const metadata = JSON.parse(await fs.readFile(process.env.METADATA_PATH, "utf8"));
+            if (
+              metadata === null || Array.isArray(metadata) || typeof metadata !== "object"
+              || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(metadata.version)
+              || metadata.tag !== `v${metadata.version}`
+              || metadata.notesFile !== "release-notes.md"
+            ) throw new Error("release metadata is malformed");
+
+            const { owner, repo } = context.repo;
+            const main = await github.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+              owner, repo, ref: "heads/main", headers,
+            });
+            if (main.data?.object?.type !== "commit" || main.data.object.sha !== process.env.GITHUB_SHA) {
+              throw new Error("main no longer points to the verified workflow commit");
+            }
+
+            try {
+              await github.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+                owner, repo, ref: `tags/${metadata.tag}`, headers,
+              });
+              throw new Error("release tag already exists");
+            } catch (error) {
+              if (error?.status !== 404) throw error;
+            }
+
+            // A read-only token is only used to reject visible published collisions.
+            // The write-authorized job performs the authoritative draft-aware recheck.
+            const releases = await github.paginate("GET /repos/{owner}/{repo}/releases", {
+              owner, repo, per_page: 100, headers,
+            });
+            if (!Array.isArray(releases)) throw new Error("published release enumeration was truncated or malformed");
+            for (const release of releases) {
+              if (
+                release === null || Array.isArray(release) || typeof release !== "object"
+                || !Number.isSafeInteger(release.id) || typeof release.tag_name !== "string"
+                || typeof release.draft !== "boolean"
+              ) throw new Error("published release enumeration was malformed");
+            }
+            const matching = releases.filter((release) => !release.draft && release.tag_name === metadata.tag);
+            if (matching.length > 1) throw new Error("ambiguous duplicate published releases exist");
+            if (matching.length !== 0) throw new Error("published release already exists");
+
+      - name: Verify release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run release:verify
+          git diff --exit-code
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Build verified release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          artifact_dir="$RUNNER_TEMP/sandlot-release/artifact"
+          mkdir -m 700 "$artifact_dir"
+          node scripts/build-release-artifact.mjs --version "$RELEASE_VERSION" --out-dir "$artifact_dir"
+
+      - name: Upload verified handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: verified-release-handoff
+          path: |
+            ${{ runner.temp }}/sandlot-release/metadata/release-notes.md
+            ${{ runner.temp }}/sandlot-release/metadata/release-metadata.json
+            ${{ runner.temp }}/sandlot-release/artifact/release-handoff.json
+            ${{ runner.temp }}/sandlot-release/artifact/*.tgz
+            ${{ runner.temp }}/sandlot-release/artifact/*.tgz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish immutable release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verified-release-handoff
+          path: ${{ runner.temp }}/sandlot-release-publish
+
+      - name: Publish verified immutable release
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v8.0.0
+        env:
+          HANDOFF_ROOT: ${{ runner.temp }}/sandlot-release-publish
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("node:fs/promises");
+            const { createHash } = require("node:crypto");
+            const path = require("node:path");
+
+            const API_VERSION = "2026-03-10";
+            const headers = { "X-GitHub-Api-Version": API_VERSION };
+            const MAX_TARBALL_BYTES = 1024 * 1024 * 1024;
+            const MAX_ASSET_POLLS = 5;
+            const ASSET_POLL_DELAY_MS = 500;
+            const root = path.resolve(process.env.HANDOFF_ROOT);
+            const artifactDir = path.join(root, "artifact");
+            const metadataDir = path.join(root, "metadata");
+            let draft;
+
+            const isObject = (value) => value !== null && !Array.isArray(value) && typeof value === "object";
+            const exactKeys = (value, keys) => isObject(value)
+              && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+            const isBasename = (value) => typeof value === "string" && value.length > 0
+              && value === path.basename(value) && !value.includes("\\") && !value.includes("\0");
+
+            async function readRegularFile(file, maxBytes) {
+              const info = await fs.lstat(file);
+              if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > maxBytes) {
+                throw new Error("verified handoff contains an invalid file");
+              }
+              const data = await fs.readFile(file);
+              if (data.length !== info.size) throw new Error("verified handoff file changed while reading");
+              return data;
+            }
+
+            async function requireExactEntries(directory, expected) {
+              const info = await fs.lstat(directory);
+              if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("verified handoff directory is invalid");
+              const entries = (await fs.readdir(directory)).sort();
+              if (JSON.stringify(entries) !== JSON.stringify([...expected].sort())) {
+                throw new Error("verified handoff contains unexpected files");
+              }
+            }
+
+            const handoffBytes = await readRegularFile(path.join(artifactDir, "release-handoff.json"), 16 * 1024);
+            const metadataBytes = await readRegularFile(path.join(metadataDir, "release-metadata.json"), 16 * 1024);
+            let handoff;
+            let metadata;
+            try {
+              handoff = JSON.parse(handoffBytes.toString("utf8"));
+              metadata = JSON.parse(metadataBytes.toString("utf8"));
+            } catch {
+              throw new Error("verified handoff JSON is malformed");
+            }
+            if (!exactKeys(handoff, ["version", "tag", "commit", "tarball", "checksum", "tarballBytes", "sha256"])) {
+              throw new Error("release handoff shape is invalid");
+            }
+            if (
+              !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(handoff.version)
+              || handoff.tag !== `v${handoff.version}`
+              || !/^[0-9a-f]{40}$/.test(handoff.commit)
+              || !isBasename(handoff.tarball) || handoff.tarball !== `sandlot-${handoff.version}.tgz`
+              || !isBasename(handoff.checksum) || handoff.checksum !== `${handoff.tarball}.sha256`
+              || !Number.isSafeInteger(handoff.tarballBytes) || handoff.tarballBytes < 1 || handoff.tarballBytes > MAX_TARBALL_BYTES
+              || !/^[0-9a-f]{64}$/.test(handoff.sha256)
+            ) throw new Error("release handoff values are invalid");
+            if (
+              !exactKeys(metadata, ["version", "tag", "notesFile"])
+              || metadata.version !== handoff.version || metadata.tag !== handoff.tag
+              || metadata.notesFile !== "release-notes.md"
+            ) throw new Error("release metadata does not match the handoff");
+
+            await requireExactEntries(metadataDir, ["release-metadata.json", "release-notes.md"]);
+            await requireExactEntries(artifactDir, ["release-handoff.json", handoff.tarball, handoff.checksum]);
+            const tarballPath = path.join(artifactDir, handoff.tarball);
+            const checksumPath = path.join(artifactDir, handoff.checksum);
+            const notesPath = path.join(metadataDir, metadata.notesFile);
+            const [tarball, checksum, notes] = await Promise.all([
+              readRegularFile(tarballPath, MAX_TARBALL_BYTES),
+              readRegularFile(checksumPath, 1024),
+              readRegularFile(notesPath, 64 * 1024),
+            ]);
+            if (tarball.length !== handoff.tarballBytes) throw new Error("release tarball size does not match the handoff");
+            const digest = createHash("sha256").update(tarball).digest("hex");
+            if (digest !== handoff.sha256 || checksum.toString("utf8") !== `${digest}  ${handoff.tarball}\n`) {
+              throw new Error("release tarball checksum does not match the handoff");
+            }
+            const releaseNotes = notes.toString("utf8");
+            if (!releaseNotes.trim() || !releaseNotes.endsWith("\n")) throw new Error("release notes are invalid");
+
+            const { owner, repo } = context.repo;
+            async function getRef(ref) {
+              return github.request("GET /repos/{owner}/{repo}/git/ref/{ref}", { owner, repo, ref, headers });
+            }
+            async function listReleases() {
+              const releases = await github.paginate("GET /repos/{owner}/{repo}/releases", {
+                owner, repo, per_page: 100, headers,
+              });
+              if (!Array.isArray(releases)) throw new Error("release enumeration was truncated or malformed");
+              for (const release of releases) {
+                if (
+                  !isObject(release) || !Number.isSafeInteger(release.id)
+                  || typeof release.tag_name !== "string" || typeof release.draft !== "boolean"
+                ) throw new Error("release enumeration was malformed");
+              }
+              return releases;
+            }
+            async function authoritativeRemoteRecheck() {
+              const main = await getRef("heads/main");
+              if (main.data?.object?.type !== "commit" || main.data.object.sha !== handoff.commit) {
+                throw new Error("main no longer points to the verified commit");
+              }
+              try {
+                await getRef(`tags/${handoff.tag}`);
+                throw new Error("release tag already exists");
+              } catch (error) {
+                if (error?.status !== 404) throw error;
+              }
+              const matching = (await listReleases()).filter((release) => release.tag_name === handoff.tag);
+              if (matching.length > 1) throw new Error("ambiguous duplicate releases exist");
+              if (matching.length !== 0) throw new Error("release or draft already exists");
+            }
+            async function requireClaimedTag() {
+              const tag = await getRef(`tags/${handoff.tag}`);
+              if (
+                tag.data?.ref !== `refs/tags/${handoff.tag}`
+                || tag.data?.object?.type !== "commit"
+                || tag.data.object.sha !== handoff.commit
+              ) throw new Error("claimed release tag does not point to the verified commit");
+            }
+            async function claimReleaseTag() {
+              let response;
+              try {
+                response = await github.request("POST /repos/{owner}/{repo}/git/refs", {
+                  owner, repo, ref: `refs/tags/${handoff.tag}`, sha: handoff.commit, headers,
+                });
+              } catch (error) {
+                throw new Error(`failed to claim release tag ${handoff.tag}`, { cause: error });
+              }
+              if (
+                response.data?.ref !== `refs/tags/${handoff.tag}`
+                || response.data?.object?.type !== "commit"
+                || response.data.object.sha !== handoff.commit
+              ) throw new Error("GitHub returned an invalid claimed release tag");
+              await requireClaimedTag();
+            }
+            function requireExactDraftReleaseData(release) {
+              const uploadUrl = Number.isSafeInteger(release?.id)
+                ? `https://uploads.github.com/repos/${owner}/${repo}/releases/${release.id}/assets{?name,label}`
+                : undefined;
+              if (
+                !Number.isSafeInteger(release?.id) || release.id < 1
+                || release.draft !== true || release.tag_name !== handoff.tag
+                || release.target_commitish !== handoff.commit
+                || release.name !== handoff.tag || release.body !== releaseNotes
+                || release.prerelease !== false || release.upload_url !== uploadUrl
+              ) {
+                throw new Error("GitHub returned an invalid draft release");
+              }
+              return release;
+            }
+            async function createDraftRelease() {
+              const response = await github.request("POST /repos/{owner}/{repo}/releases", {
+                owner, repo,
+                tag_name: handoff.tag,
+                target_commitish: handoff.commit,
+                name: handoff.tag,
+                body: releaseNotes,
+                draft: true,
+                prerelease: false,
+                headers,
+              });
+              if (Number.isSafeInteger(response.data?.id)) draft = { id: response.data.id };
+              return requireExactDraftReleaseData(response.data);
+            }
+            async function requireExactDraftRelease() {
+              const response = await github.request("GET /repos/{owner}/{repo}/releases/{release_id}", {
+                owner, repo, release_id: draft.id, headers,
+              });
+              const release = requireExactDraftReleaseData(response.data);
+              if (release.id !== draft.id) throw new Error("GitHub returned an invalid draft release");
+            }
+            async function listAssets(releaseId) {
+              const assets = await github.paginate("GET /repos/{owner}/{repo}/releases/{release_id}/assets", {
+                owner, repo, release_id: releaseId, per_page: 100, headers,
+              });
+              if (!Array.isArray(assets)) throw new Error("release asset enumeration was truncated or malformed");
+              return assets;
+            }
+            function requireAssets(assets) {
+              const expected = new Map([
+                [handoff.tarball, { size: tarball.length, digest }],
+                [handoff.checksum, { size: checksum.length, digest: createHash("sha256").update(checksum).digest("hex") }],
+              ]);
+              if (assets.length !== expected.size) throw new Error("release has an unexpected asset count");
+              const seen = new Set();
+              for (const asset of assets) {
+                if (!isObject(asset) || typeof asset.name !== "string" || !Number.isSafeInteger(asset.size)) {
+                  throw new Error("release asset response is malformed");
+                }
+                if (seen.has(asset.name)) throw new Error("release contains a duplicate asset name");
+                seen.add(asset.name);
+                const wanted = expected.get(asset.name);
+                if (wanted === undefined || asset.size !== wanted.size) throw new Error("release asset name or size is invalid");
+                if (asset.state !== "uploaded") throw new Error("release asset is not fully uploaded");
+                if (asset.digest !== `sha256:${wanted.digest}`) throw new Error("release asset server digest is invalid");
+              }
+              if (seen.size !== expected.size) throw new Error("release is missing an expected asset");
+            }
+            async function waitForVerifiedAssets(releaseId) {
+              let lastError;
+              for (let attempt = 0; attempt < MAX_ASSET_POLLS; attempt += 1) {
+                try {
+                  requireAssets(await listAssets(releaseId));
+                  return;
+                } catch (error) {
+                  lastError = error;
+                  if (attempt + 1 < MAX_ASSET_POLLS) {
+                    await new Promise((resolve) => setTimeout(resolve, ASSET_POLL_DELAY_MS));
+                  }
+                }
+              }
+              throw lastError;
+            }
+            async function uploadAndVerifyReleaseAssets() {
+              await github.request(`POST ${draft.upload_url}`, {
+                name: handoff.tarball, data: tarball,
+                headers: { ...headers, "content-type": "application/gzip", "content-length": tarball.length },
+              });
+              await github.request(`POST ${draft.upload_url}`, {
+                name: handoff.checksum, data: checksum,
+                headers: { ...headers, "content-type": "text/plain; charset=utf-8", "content-length": checksum.length },
+              });
+              await waitForVerifiedAssets(draft.id);
+            }
+            async function publishDraftRelease() {
+              const response = await github.request("PATCH /repos/{owner}/{repo}/releases/{release_id}", {
+                owner, repo, release_id: draft.id, draft: false, headers,
+              });
+              if (response.data?.draft !== false || response.data?.tag_name !== handoff.tag) {
+                throw new Error("GitHub did not publish the expected draft");
+              }
+            }
+            async function assertImmutablePublicRelease() {
+              const response = await github.request("GET /repos/{owner}/{repo}/releases/tags/{tag}", {
+                owner, repo, tag: handoff.tag, headers,
+              });
+              const release = response.data;
+              if (
+                !isObject(release) || release.id !== draft.id || release.draft !== false
+                || release.prerelease !== false || release.immutable !== true
+                || release.tag_name !== handoff.tag || release.target_commitish !== handoff.commit
+                || release.body !== releaseNotes
+              ) throw new Error("published release is not the expected immutable release");
+              await waitForVerifiedAssets(release.id);
+              const tag = await getRef(`tags/${handoff.tag}`);
+              if (tag.data?.object?.type !== "commit" || tag.data.object.sha !== handoff.commit) {
+                throw new Error("published tag does not point to the verified commit");
+              }
+            }
+
+            try {
+              await authoritativeRemoteRecheck();
+              await claimReleaseTag();
+              draft = await createDraftRelease();
+              await uploadAndVerifyReleaseAssets();
+              await requireClaimedTag();
+              await requireExactDraftRelease();
+              await publishDraftRelease();
+              await assertImmutablePublicRelease();
+            } catch (error) {
+              const returnedId = Number.isSafeInteger(draft?.id) ? draft.id : "unknown";
+              core.error(`Release failure for intended tag ${handoff.tag}; returned draft ID: ${returnedId}. Inspect remote state and clean up deliberately.`);
+              throw error;
+            }

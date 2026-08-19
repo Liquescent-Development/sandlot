@@ -10,6 +10,8 @@
     "bin/mktemp",
     "scripts/pack-check.mjs",
     "README.md",
+    "CHANGELOG.md",
+    "docs",
     "SPEC.md",
     "LICENSE"
   ],
@@ -21,6 +23,8 @@
     "test:smoke": "vitest run test/smoke",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pack:check": "node scripts/pack-check.mjs",
+    "release:artifact": "node scripts/build-release-artifact.mjs",
+    "release:metadata": "node scripts/release-metadata.mjs",
     "prepublishOnly": "npm test && npm run typecheck && npm run build && npm run test:smoke",
     "release:verify": "npm test && npm run typecheck && npm run build && SANDLOT_REQUIRE_INTEGRATION=1 npm run test:integration && npm run test:smoke && npm run pack:check"
   },
