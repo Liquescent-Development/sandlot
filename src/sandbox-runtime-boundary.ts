@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { serialize } from "node:v8";
 import type { SandboxDependencyCheck, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { buildOuterEnvironment, buildSandboxedChildCommand } from "./environment.js";
+import type { NetworkMode } from "./config.js";
 import type {
   SandboxExecutionTerminationGate,
   SandboxViolationLike,
@@ -225,11 +226,21 @@ export class SandboxRuntimeBoundary {
     return this.request("checkDependencies", { ripgrepConfig });
   }
 
-  async initialize(config: SandboxRuntimeConfig, _askCallback?: undefined, enableLogMonitor = false): Promise<void> {
+  async initialize(
+    config: SandboxRuntimeConfig,
+    _askCallback?: undefined,
+    enableLogMonitor = false,
+    networkMode: NetworkMode = "filtered",
+  ): Promise<void> {
     const credentialEnvironment = buildCredentialEnvironment(config, this.#hostEnvironment);
     await this.request(
       "initialize",
-      { config: this.withOperationalTemporaryGrant(config), enableLogMonitor, credentialEnvironment },
+      {
+        config: this.withOperationalTemporaryGrant(config),
+        networkMode,
+        enableLogMonitor,
+        credentialEnvironment,
+      },
       undefined,
       credentialValues(credentialEnvironment),
     );

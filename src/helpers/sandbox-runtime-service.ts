@@ -1,6 +1,7 @@
 import {
   SandboxManager,
   SandboxRuntimeConfigSchema,
+  type SandboxAskCallback,
   type SandboxRuntimeConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import { registerAwsPairs } from "@anthropic-ai/sandbox-runtime/dist/sandbox/credential-aws-pairs.js";
@@ -10,11 +11,16 @@ import { spawn } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serialize } from "node:v8";
+import type { NetworkMode } from "../config.js";
 
 interface ServiceManager {
   updateConfig(config: SandboxRuntimeConfig): void;
   checkDependenciesAsync(ripgrepConfig?: { command: string; args?: string[] }): Promise<unknown>;
-  initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+  initialize(
+    config: SandboxRuntimeConfig,
+    askCallback?: SandboxAskCallback,
+    enableLogMonitor?: boolean,
+  ): Promise<void>;
   wrapWithSandboxArgv(
     command: string,
     binShell?: string,
@@ -83,6 +89,7 @@ const MAX_IPC_DATA_DEPTH = 20;
 const MAX_IPC_DATA_NODES = 16_384;
 const MAX_CREDENTIAL_ENVIRONMENT_NAMES = 128;
 const MAX_CREDENTIAL_VALUE_BYTES = 256 * 1024;
+const allowAllNetwork: SandboxAskCallback = async () => true;
 
 interface ServiceRequestDependencies {
   readonly scanMandatoryDenyPaths: (
@@ -176,15 +183,21 @@ async function dispatchSandboxRuntimeRequest(
     case "initialize": {
       const record = requiredPayloadRecord(
         payload,
-        ["config", "enableLogMonitor", "credentialEnvironment"],
-        ["config"],
+        ["config", "networkMode", "enableLogMonitor", "credentialEnvironment"],
+        ["config", "networkMode"],
       );
       const config = requiredConfig(record.config);
+      const networkMode = requiredNetworkMode(record.networkMode);
+      assertNetworkModeConfigPair(networkMode, config);
       const credentialEnvironment = requiredCredentialEnvironment(record.credentialEnvironment, config);
       if (record.enableLogMonitor !== undefined && typeof record.enableLogMonitor !== "boolean") {
         throw new Error("Sandbox Runtime service enableLogMonitor must be boolean");
       }
-      await manager.initialize(config, undefined, record.enableLogMonitor === true);
+      await manager.initialize(
+        config,
+        networkMode === "unrestricted" ? allowAllNetwork : undefined,
+        record.enableLogMonitor === true,
+      );
       state.credentialEnvironment = credentialEnvironment;
       state.config = config;
       return undefined;
@@ -662,6 +675,30 @@ function requiredConfig(value: unknown): SandboxRuntimeConfig {
   return SandboxRuntimeConfigSchema.parse(value);
 }
 
+function requiredNetworkMode(value: unknown): NetworkMode {
+  if (value === "filtered" || value === "unrestricted") return value;
+  throw new Error("Sandbox Runtime service network mode must be filtered or unrestricted");
+}
+
+function assertNetworkModeConfigPair(networkMode: NetworkMode, config: SandboxRuntimeConfig): void {
+  const network = config.network;
+  if (networkMode === "filtered") {
+    if (network.strictAllowlist !== true) {
+      throw new Error("Sandbox Runtime service filtered network mode requires strict allowlisting");
+    }
+    return;
+  }
+  if (
+    network.strictAllowlist !== false
+    || network.allowedDomains.length !== 0
+    || network.deniedDomains.length !== 0
+  ) {
+    throw new Error(
+      "Sandbox Runtime service unrestricted network mode requires strictAllowlist false and empty domain lists",
+    );
+  }
+}
+
 function requiredCredentialEnvironment(
   value: unknown,
   config: SandboxRuntimeConfig,
@@ -709,8 +746,8 @@ function credentialEnvironmentForRequest(
     payload,
     operation === "updateConfig"
       ? ["config", "credentialEnvironment"]
-      : ["config", "enableLogMonitor", "credentialEnvironment"],
-    ["config"],
+      : ["config", "networkMode", "enableLogMonitor", "credentialEnvironment"],
+    operation === "updateConfig" ? ["config"] : ["config", "networkMode"],
   );
   return requiredCredentialEnvironment(record.credentialEnvironment, requiredConfig(record.config));
 }

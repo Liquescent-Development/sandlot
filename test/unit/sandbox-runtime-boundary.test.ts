@@ -16,6 +16,38 @@ import {
 import { sandlotMktempShimDirectory } from "../../src/environment.js";
 
 describe("SandboxRuntimeBoundary", () => {
+  it("sends the explicit effective network mode through IPC without inferring it from SRT config", async () => {
+    const requests: Array<{ operation: string; payload: unknown }> = [];
+    const transport: SandboxRuntimeTransport = {
+      request: vi.fn(async (operation, payload) => {
+        requests.push({ operation, payload });
+        return undefined;
+      }),
+      notify: vi.fn(),
+      close: vi.fn(async () => undefined),
+    };
+    const boundary = new SandboxRuntimeBoundary({
+      nodePath: "/trusted/node",
+      servicePath: "/trusted/sandbox-runtime-service.js",
+      platform: "darwin",
+      hostEnvironment: {},
+      createTransport: vi.fn(async () => transport),
+    });
+    const config: SandboxRuntimeConfig = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: ["/workspace"], denyWrite: [] },
+    };
+
+    await boundary.open("/workspace");
+    await boundary.initialize(config, undefined, false, "filtered");
+
+    expect(requests.find(({ operation }) => operation === "initialize")?.payload).toMatchObject({
+      networkMode: "filtered",
+      config: expect.objectContaining({ network: expect.objectContaining({ strictAllowlist: false }) }),
+    });
+    await boundary.reset();
+  });
+
   it("replaces inherited temporary variables and grants only its private session directory to SRT", async () => {
     const requests: Array<{ operation: string; payload: unknown }> = [];
     let launchEnvironment: NodeJS.ProcessEnv | undefined;

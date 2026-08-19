@@ -113,6 +113,7 @@ describe("Sandlot extension contract", () => {
       }),
       undefined,
       true,
+      "filtered",
     );
     expect(harness.runtime.snapshot()).toMatchObject({ state: "ready", generation: 1, error: undefined });
     expect(harness.imageProcessor.bind).toHaveBeenCalledTimes(1);
@@ -151,6 +152,24 @@ describe("Sandlot extension contract", () => {
     expect(harness.manager.open).toHaveBeenCalledWith("/workspace");
     expect(harness.manager.open.mock.invocationCallOrder[0])
       .toBeLessThan(harness.manager.updateConfig.mock.invocationCallOrder[0] as number);
+  });
+
+  it("sends the trusted effective mode rather than inferring unrestricted access from SRT config", async () => {
+    const harness = createHarness();
+    vi.mocked(harness.dependencies.toSandboxRuntimeConfig).mockReturnValue({
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: harness.effective.filesystem,
+    });
+    harness.extension(harness.pi.api);
+
+    await harness.pi.emit("session_start", { type: "session_start", reason: "startup" }, createContext().value);
+
+    expect(harness.manager.initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ network: expect.objectContaining({ strictAllowlist: false }) }),
+      undefined,
+      true,
+      "filtered",
+    );
   });
 
   it("closes an opened runtime boundary when preflight fails", async () => {
@@ -1312,6 +1331,7 @@ function createHarness(options: {
 function effectivePolicy(enabled: boolean): EffectivePolicy {
   return {
     enabled,
+    networkMode: "filtered",
     network: {
       allowedDomains: [],
       deniedDomains: [],

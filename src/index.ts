@@ -49,7 +49,12 @@ interface ExtensionSandboxManager extends SandboxManagerLike {
   updateConfig(config: SandboxRuntimeConfig): Promise<void>;
   getLinuxGlobPatternWarnings(): Promise<string[]>;
   checkDependenciesAsync(ripgrepConfig?: { command: string; args?: string[] }): Promise<SandboxDependencyCheck>;
-  initialize(config: SandboxRuntimeConfig, askCallback?: undefined, enableLogMonitor?: boolean): Promise<void>;
+  initialize(
+    config: SandboxRuntimeConfig,
+    askCallback?: undefined,
+    enableLogMonitor?: boolean,
+    networkMode?: EffectivePolicy["networkMode"],
+  ): Promise<void>;
   reset(): Promise<void>;
   getSandboxViolationStore(): SandboxManagerLike["getSandboxViolationStore"] extends (...args: never[]) => infer T
     ? T & { clear(): void; getViolations(limit?: number): Array<{ line: string }>; getTotalCount(): number }
@@ -203,7 +208,7 @@ export function createSandlotExtension(dependencies: ExtensionDependencies) {
           );
         }
 
-        await dependencies.manager.initialize(config, undefined, true);
+        await dependencies.manager.initialize(config, undefined, true, policy.networkMode);
         assertProtectedOwnership(pi.getAllTools(), dependencies.sandlotSourcePath);
         dependencies.runtime.markReady(policy);
         setStatus(ctx, "🔒 Sandlot");

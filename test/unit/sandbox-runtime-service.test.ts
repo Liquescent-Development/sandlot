@@ -8,6 +8,57 @@ import {
 } from "../../src/helpers/sandbox-runtime-service.js";
 
 describe("Sandbox Runtime service protocol", () => {
+  it("passes no ask callback for a trusted filtered initialization", async () => {
+    const manager = serviceManager();
+    const config = {
+      network: { allowedDomains: ["api.example.com"], deniedDomains: [], strictAllowlist: true },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "filtered",
+      enableLogMonitor: true,
+    });
+
+    expect(manager.initialize).toHaveBeenCalledWith(config, undefined, true);
+  });
+
+  it("creates an allow-all ask callback only for validated unrestricted initialization", async () => {
+    const manager = serviceManager();
+    const config = {
+      network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    };
+
+    await handleSandboxRuntimeRequest(manager, "initialize", {
+      config,
+      networkMode: "unrestricted",
+    });
+
+    const callback = manager.initialize.mock.calls[0]?.[1];
+    expect(callback).toEqual(expect.any(Function));
+    await expect(callback?.({ host: "unlisted.example", port: 443 })).resolves.toBe(true);
+  });
+
+  it.each([
+    ["an unknown mode", "ask-everything", { allowedDomains: [], deniedDomains: [], strictAllowlist: false }],
+    ["a non-string mode", false, { allowedDomains: [], deniedDomains: [], strictAllowlist: false }],
+    ["a filtered mode paired with an unrestricted config", "filtered", { allowedDomains: [], deniedDomains: [], strictAllowlist: false }],
+    ["an unrestricted mode paired with strict allowlisting", "unrestricted", { allowedDomains: [], deniedDomains: [], strictAllowlist: true }],
+    ["an unrestricted mode paired with allowed domains", "unrestricted", { allowedDomains: ["api.example.com"], deniedDomains: [], strictAllowlist: false }],
+    ["an unrestricted mode paired with denied domains", "unrestricted", { allowedDomains: [], deniedDomains: ["blocked.example"], strictAllowlist: false }],
+  ])("rejects %s before SRT initialization", async (_label, networkMode, network) => {
+    const manager = serviceManager();
+
+    await expect(handleSandboxRuntimeRequest(manager, "initialize", {
+      config: { network, filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
+      networkMode,
+    })).rejects.toThrow(/network mode|strict allowlist|domain/i);
+
+    expect(manager.initialize).not.toHaveBeenCalled();
+  });
+
   it("routes wrap ownership, cwd, cleanup, and command-scoped violations through SRT", async () => {
     const cwd = process.cwd();
     const violations = [{ line: "deny file-write /protected" }];
@@ -422,7 +473,7 @@ describe("Sandbox Runtime service protocol", () => {
     const requests = Array.from({ length: 65 }, () => handleSandboxRuntimeRequest(
       manager,
       "initialize",
-      { config },
+      { config, networkMode: "filtered" },
       undefined,
       dependencies,
     ).catch((error: unknown) => error));
