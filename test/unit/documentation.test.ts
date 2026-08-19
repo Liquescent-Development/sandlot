@@ -84,4 +84,12 @@ describe("public documentation", () => {
     expect(changelog).toMatch(/^## \[Unreleased\]$/m);
     expect(changelog).toMatch(/^## \[0\.1\.0\] - 2026-08-\d{2}$/m);
   });
+
+  it("documents fail-closed session cleanup lifecycle guarantees", async () => {
+    const configuration = await read("docs/configuration.md");
+
+    expect(configuration).toMatch(/runner-owned command and supervised descendant has positively settled/i);
+    expect(configuration).toMatch(/generation-tagged service transport/i);
+    expect(configuration).toMatch(/indeterminate termination or cleanup failure is surfaced/i);
+  });
 });
