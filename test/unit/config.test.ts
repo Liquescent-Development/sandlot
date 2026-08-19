@@ -76,6 +76,16 @@ describe("Sandlot configuration", () => {
       .toMatchObject({ network: { mode: "unrestricted" } });
   });
 
+  it("accepts unrestricted masking when no credential injection is requested", () => {
+    expect(parseUserPolicy({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    })).toMatchObject({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    });
+  });
+
   it("rejects filtered network rules in unrestricted mode", () => {
     expect(() => parseUserPolicy({ network: { mode: "unrestricted", allowedDomains: ["api.example.com"] } }))
       .toThrow(/allowedDomains|unrecognized/i);

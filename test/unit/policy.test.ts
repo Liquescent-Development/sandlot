@@ -400,6 +400,11 @@ describe("policy composition", () => {
       network: { mode: "unrestricted" },
       credentials: { envVars: [{ name: "TOKEN", mode: "deny" }] },
     }, undefined, context)).resolves.toBeDefined();
+    const masked = await composePolicy({
+      network: { mode: "unrestricted" },
+      credentials: { envVars: [{ name: "TOKEN", mode: "mask" }] },
+    }, undefined, context);
+    expect(toSandboxRuntimeConfig(masked).credentials?.envVars).toEqual([{ name: "TOKEN", mode: "deny" }]);
     await expect(composePolicy({
       network: { mode: "unrestricted" },
       credentials: { envVars: [{ name: "TOKEN", mode: "deny", injectHosts: ["api.example.com"] }] },

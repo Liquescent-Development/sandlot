@@ -330,7 +330,7 @@ function validateSandboxRuntimePolicy(policy: UserPolicy, source: string): void 
       strictAllowlist: policy.network?.mode !== "unrestricted",
     },
     filesystem: { denyRead: [], allowWrite: [], denyWrite: [], ...policy.filesystem },
-    credentials: policy.credentials,
+    credentials: credentialsForRuntime(policy.credentials, policy.network?.mode, source),
     enableWeakerNestedSandbox: policy.enableWeakerNestedSandbox,
     enableWeakerNetworkIsolation: policy.enableWeakerNetworkIsolation,
     allowAppleEvents: policy.allowAppleEvents,
@@ -340,6 +340,29 @@ function validateSandboxRuntimePolicy(policy: UserPolicy, source: string): void 
     socatPath: policy.socatPath,
   });
   if (!result.success) throw new SandlotConfigError(source, formatIssues(result.error));
+}
+
+function credentialsForRuntime(
+  credentials: UserPolicy["credentials"],
+  networkMode: NetworkMode | undefined,
+  source: string,
+): UserPolicy["credentials"] {
+  if (networkMode !== "unrestricted" || credentials === undefined) return credentials;
+  for (const [kind, entries] of [["files", credentials.files], ["envVars", credentials.envVars]] as const) {
+    for (const [index, entry] of (entries ?? []).entries()) {
+      if (entry.injectHosts !== undefined) {
+        throw new SandlotConfigError(
+          source,
+          `credentials.${kind}[${index}].injectHosts cannot be used when network.mode is unrestricted; injected credentials require a filtered network allowlist`,
+        );
+      }
+    }
+  }
+  return {
+    ...credentials,
+    files: credentials.files?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
+    envVars: credentials.envVars?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
+  };
 }
 
 function validateProjectRuntimePolicy(policy: ProjectPolicy, source: string): void {

@@ -91,6 +91,14 @@ export async function composePolicy(
   const projectFilesystem = project?.filesystem === undefined
     ? undefined
     : await canonicalizeFilesystem(project.filesystem, context.cwd, "project filesystem");
+  const credentials = credentialsForRuntime(
+    await canonicalizeCredentialFiles(
+      trusted.credentials,
+      context.cwd,
+      canonicalCustomCredentialFiles,
+    ),
+    trusted.network.mode,
+  );
   const userSockets = await canonicalizePaths(trusted.network.allowUnixSockets, context.cwd, "network.allowUnixSockets");
   const projectSockets = await canonicalizePaths(project?.network?.allowUnixSockets, context.cwd, "network.allowUnixSockets");
 
@@ -139,11 +147,7 @@ export async function composePolicy(
       denyWrite: stableUnion(userFilesystem.denyWrite, projectFilesystem?.denyWrite),
       allowGitConfig: disableOnly(userFilesystem.allowGitConfig, projectFilesystem?.allowGitConfig, "filesystem.allowGitConfig"),
     },
-    credentials: await canonicalizeCredentialFiles(
-      trusted.credentials,
-      context.cwd,
-      canonicalCustomCredentialFiles,
-    ),
+    credentials,
     environment: trusted.environment,
     trustedCustomTools,
     enableWeakerNestedSandbox: disableOnly(trusted.enableWeakerNestedSandbox, project?.enableWeakerNestedSandbox, "enableWeakerNestedSandbox"),
@@ -502,6 +506,28 @@ function validateCredentialInjectionCoverage(effective: EffectivePolicy): void {
       }
     }
   }
+}
+
+function credentialsForRuntime(
+  credentials: NonNullable<UserPolicy["credentials"]> | undefined,
+  networkMode: NetworkMode,
+): NonNullable<UserPolicy["credentials"]> | undefined {
+  if (networkMode !== "unrestricted" || credentials === undefined) return credentials;
+  for (const [kind, entries] of [["files", credentials.files], ["envVars", credentials.envVars]] as const) {
+    for (const [index, entry] of (entries ?? []).entries()) {
+      if (entry.injectHosts !== undefined) {
+        throw new SandlotConfigError(
+          "user policy",
+          `credentials.${kind}[${index}].injectHosts cannot be used when network.mode is unrestricted; injected credentials require a filtered network allowlist`,
+        );
+      }
+    }
+  }
+  return {
+    ...credentials,
+    files: credentials.files?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
+    envVars: credentials.envVars?.map((entry) => entry.mode === "mask" ? { ...entry, mode: "deny" as const } : entry),
+  };
 }
 
 function parseDomainPattern(pattern: string): ParsedDomainPattern {
